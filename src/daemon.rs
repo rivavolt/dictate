@@ -10,6 +10,7 @@ use crate::deepgram;
 use crate::ipc;
 use crate::output;
 use crate::sound;
+use crate::tray;
 
 struct DaemonState {
     config: Config,
@@ -19,10 +20,11 @@ struct DaemonState {
     /// Keep the cpal Stream alive while recording in live mode
     _audio_stream: Option<cpal::Stream>,
     record_handle: Option<tokio::task::JoinHandle<()>>,
+    tray_handle: ksni::Handle<tray::DictateTray>,
 }
 
 impl DaemonState {
-    fn new() -> Self {
+    fn new(tray_handle: ksni::Handle<tray::DictateTray>) -> Self {
         let config = Config::new();
         let state = State::load(&config);
         Self {
@@ -32,6 +34,7 @@ impl DaemonState {
             stop_flag: None,
             _audio_stream: None,
             record_handle: None,
+            tray_handle,
         }
     }
 
@@ -42,7 +45,9 @@ impl DaemonState {
 
         self.recording = true;
         fs::write(&self.config.state_file, "recording")?;
-        sound::play(&self.config.sound_dir, "start");
+        sound::play_start();
+        let tray = self.tray_handle.clone();
+        tokio::spawn(async move { tray.update(|t| t.set_recording(true)).await; });
 
         let stop = Arc::new(AtomicBool::new(false));
         self.stop_flag = Some(stop.clone());
@@ -181,7 +186,9 @@ impl DaemonState {
 
         self.recording = false;
         fs::write(&self.config.state_file, "idle")?;
-        sound::play(&self.config.sound_dir, "stop");
+        sound::play_stop();
+        let tray = self.tray_handle.clone();
+        tokio::spawn(async move { tray.update(|t| t.set_recording(false)).await; });
 
         Ok("stopped".into())
     }
@@ -246,7 +253,11 @@ impl DaemonState {
 }
 
 pub async fn run() -> Result<()> {
-    let mut daemon = DaemonState::new();
+    // Spawn system tray
+    let (tray_tx, mut tray_rx) = mpsc::channel::<()>(4);
+    let tray_handle = tray::spawn(tray_tx).await?;
+
+    let mut daemon = DaemonState::new(tray_handle);
 
     tracing::info!(
         "starting daemon (mode: {}, lang: {}, model: {})",
@@ -286,6 +297,9 @@ pub async fn run() -> Result<()> {
             Some((req, resp_tx)) = ipc_rx.recv() => {
                 let resp = daemon.handle_command(req);
                 let _ = resp_tx.send(resp);
+            }
+            Some(()) = tray_rx.recv() => {
+                let _ = daemon.toggle_recording();
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");

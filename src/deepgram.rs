@@ -53,9 +53,11 @@ pub async fn stream_live(
         .header("Authorization", format!("Token {}", api_key))
         .body(())?;
 
+    tracing::debug!("connecting to Deepgram (model: {}, lang: {})", state.model, state.lang);
     let (ws_stream, _) = connect_async(request)
         .await
         .context("WebSocket connect failed")?;
+    tracing::debug!("Deepgram WebSocket connected");
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     let stop_sender = stop.clone();
@@ -98,6 +100,7 @@ pub async fn stream_live(
                 continue;
             }
 
+            tracing::info!("transcript: {}", alt.transcript);
             output::type_text(&alt.transcript);
             full_transcript.push_str(&alt.transcript);
             full_transcript.push(' ');
@@ -111,8 +114,9 @@ pub async fn stream_live(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let _ = tokio::time::timeout(Duration::from_millis(300), async {
-        let _ = tokio::join!(sender_task, receiver_task);
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        let _ = sender_task.await;
+        let _ = receiver_task.await;
     })
     .await;
 
@@ -122,7 +126,7 @@ pub async fn stream_live(
 pub async fn transcribe_file(path: &std::path::Path, lang: &str, model: &str) -> Result<String> {
     let api_key = config::get_api_key()?;
     let url = format!(
-        "https://api.deepgram.com/v1/listen?model={}&language={}&smart_format=true",
+        "https://api.deepgram.com/v1/listen?model={}&language={}&detect_language=true&smart_format=true",
         model, lang
     );
 

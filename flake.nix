@@ -1,9 +1,10 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, crane }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system:
@@ -25,7 +26,7 @@
             environmentFile = lib.mkOption {
               type = lib.types.nullOr lib.types.path;
               default = null;
-              description = "Path to environment file (DEEPGRAM_API_KEY, optionally DICTATE_KEY)";
+              description = "Path to environment file (DEEPGRAM_API_KEY)";
             };
           };
 
@@ -59,13 +60,11 @@
           };
         };
 
-      packages = forAllSystems ({ pkgs }: {
-        default = pkgs.rustPlatform.buildRustPackage {
-          pname = "dictate";
-          version = "0.2.0";
-          src = nixpkgs.lib.cleanSource ./.;
-          useFetchCargoVendor = true;
-          cargoHash = "sha256-AN267ZgjpgXtfwjoYlj6d+xuIZL0+KA8EqQQQz/pSes=";
+      packages = forAllSystems ({ pkgs }: let
+        craneLib = crane.mkLib pkgs;
+      in {
+        default = craneLib.buildPackage {
+          src = craneLib.cleanCargoSource ./.;
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.alsa-lib pkgs.openssl ];
           meta = {

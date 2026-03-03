@@ -5,6 +5,7 @@ mod deepgram;
 mod ipc;
 mod output;
 mod sound;
+mod tray;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

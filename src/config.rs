@@ -8,7 +8,6 @@ pub struct Config {
     pub audio_file: PathBuf,
     pub lang_file: PathBuf,
     pub mode_file: PathBuf,
-    pub sound_dir: PathBuf,
     pub socket_path: PathBuf,
 }
 
@@ -20,9 +19,6 @@ impl Config {
         let state_dir = dirs::state_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local/state"))
             .join("dictate");
-        let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"));
-
         let _ = fs::create_dir_all(&state_dir);
 
         Self {
@@ -31,7 +27,6 @@ impl Config {
             audio_file: runtime_dir.join("dictate.wav"),
             lang_file: state_dir.join("language"),
             mode_file: state_dir.join("mode"),
-            sound_dir: config_dir.join("dictate/sounds"),
             socket_path: runtime_dir.join("dictate.sock"),
         }
     }

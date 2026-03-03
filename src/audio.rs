@@ -17,7 +17,6 @@ pub struct AudioConfig {
 pub fn get_audio_config() -> Result<AudioConfig> {
     let host = cpal::default_host();
     let device = host.default_input_device().context("no input device")?;
-
     let config_range = device
         .supported_input_configs()?
         .filter(|c| c.channels() <= CHANNELS && c.sample_format() == cpal::SampleFormat::F32)
