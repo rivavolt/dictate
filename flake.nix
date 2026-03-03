@@ -50,7 +50,6 @@
                 EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
                 PassEnvironment = [ "WAYLAND_DISPLAY" ];
 
-                SupplementaryGroups = [ "input" ];
                 NoNewPrivileges = true;
                 ProtectControlGroups = true;
                 ProtectKernelTunables = true;
@@ -70,7 +69,7 @@
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.alsa-lib pkgs.openssl ];
           meta = {
-            description = "Voice-to-text dictation daemon with evdev keybind";
+            description = "Voice-to-text dictation daemon";
             mainProgram = "dictate";
           };
         };
