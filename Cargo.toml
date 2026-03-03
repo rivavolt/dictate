@@ -1,0 +1,20 @@
+[package]
+name = "dictate"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1", features = ["full", "signal"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+cpal = "0.15"
+dirs = "5.0"
+hound = "3.5"
+reqwest = { version = "0.12", features = ["multipart"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+evdev = { version = "0.12", features = ["tokio"] }
