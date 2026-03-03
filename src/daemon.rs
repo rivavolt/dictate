@@ -5,9 +5,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::audio;
-use crate::config::{self, Config, State};
+use crate::config::{Config, State};
 use crate::deepgram;
-use crate::evdev;
 use crate::ipc;
 use crate::output;
 use crate::sound;
@@ -263,16 +262,6 @@ pub async fn run() -> Result<()> {
     let listener = ipc::bind(&daemon.config.socket_path)?;
     tracing::info!("IPC socket: {}", daemon.config.socket_path.display());
 
-    let key_code = config::get_evdev_key();
-    let (evdev_tx, mut evdev_rx) = mpsc::channel::<()>(4);
-
-    // Spawn evdev watcher
-    tokio::spawn(async move {
-        if let Err(e) = evdev::watch_key(key_code, evdev_tx).await {
-            tracing::error!("evdev watcher failed: {e}");
-        }
-    });
-
     // Spawn IPC acceptor that forwards commands
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<(ipc::Request, tokio::sync::oneshot::Sender<ipc::Response>)>(16);
 
@@ -294,13 +283,6 @@ pub async fn run() -> Result<()> {
 
     loop {
         tokio::select! {
-            Some(()) = evdev_rx.recv() => {
-                tracing::info!("key press detected");
-                match daemon.toggle_recording() {
-                    Ok(msg) => tracing::info!("{msg}"),
-                    Err(e) => tracing::error!("toggle failed: {e}"),
-                }
-            }
             Some((req, resp_tx)) = ipc_rx.recv() => {
                 let resp = daemon.handle_command(req);
                 let _ = resp_tx.send(resp);

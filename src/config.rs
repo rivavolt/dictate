@@ -57,13 +57,6 @@ pub fn get_api_key() -> Result<String> {
         .context("DEEPGRAM_API_KEY not set in env or ~/.config/env")
 }
 
-pub fn get_evdev_key() -> u16 {
-    std::env::var("DICTATE_KEY")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(63) // KEY_F5
-}
-
 #[derive(Clone)]
 pub struct State {
     pub lang: String,

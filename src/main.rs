@@ -2,7 +2,6 @@ mod audio;
 mod config;
 mod daemon;
 mod deepgram;
-mod evdev;
 mod ipc;
 mod output;
 mod sound;
@@ -19,7 +18,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the daemon (evdev listener + IPC server + recording)
+    /// Run the daemon (IPC server + recording)
     Daemon,
     /// Toggle recording on/off
     Toggle,
