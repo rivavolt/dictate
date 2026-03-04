@@ -666,63 +666,55 @@ impl State {
 
             let pending_alpha = text_alpha * 0.5;
 
-            // Render each line, coloring final vs pending portions
+            // Render each line, coloring final vs pending portions.
+            // Track position in the display string by finding each wrapped line's
+            // start via str::find, which is correct for any UTF-8 content.
+            let split_at = final_with_sep.len();
             let base_y = ph - PADDING_Y * sf - total_text_h + scroll_y;
-            let mut char_offset = 0usize;
+            let mut display_pos = 0usize;
+
+            let mut final_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, text_alpha));
+            final_paint.set_font(&[self.font_id]);
+            final_paint.set_font_size(font_sz);
+            final_paint.set_text_baseline(Baseline::Middle);
+
+            let mut pend_paint = Paint::color(Color::rgbaf(0.6, 0.6, 0.6, pending_alpha));
+            pend_paint.set_font(&[self.font_id]);
+            pend_paint.set_font_size(font_sz);
+            pend_paint.set_text_baseline(Baseline::Middle);
+
             for (i, line) in self.wrapped_lines.iter().enumerate() {
                 let y = base_y + (i as f32 + 0.5) * self.line_height * sf - scroll_y;
+
+                // Advance display_pos to where this line's content starts
+                if let Some(offset) = display[display_pos..].find(line.as_str()) {
+                    display_pos += offset;
+                }
+                let line_start = display_pos;
+                let line_end = display_pos + line.len();
+                display_pos = line_end;
+
                 if y < -self.line_height * sf || y > ph + self.line_height * sf {
-                    char_offset += line.len() + 1; // +1 for the space between words
                     continue;
                 }
 
-                // Figure out which part of this line is final vs pending
-                let line_start = char_offset;
-                let line_end = char_offset + line.len();
-                let split_at = final_with_sep.len();
-
                 if line_end <= split_at {
-                    // Entire line is final text
-                    let mut paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, text_alpha));
-                    paint.set_font(&[self.font_id]);
-                    paint.set_font_size(font_sz);
-                    paint.set_text_baseline(Baseline::Middle);
-                    let _ = self.canvas.fill_text(text_x, y, line, &paint);
+                    let _ = self.canvas.fill_text(text_x, y, line, &final_paint);
                 } else if line_start >= split_at {
-                    // Entire line is pending
-                    let mut paint = Paint::color(Color::rgbaf(0.6, 0.6, 0.6, pending_alpha));
-                    paint.set_font(&[self.font_id]);
-                    paint.set_font_size(font_sz);
-                    paint.set_text_baseline(Baseline::Middle);
-                    let _ = self.canvas.fill_text(text_x, y, line, &paint);
+                    let _ = self.canvas.fill_text(text_x, y, line, &pend_paint);
                 } else {
-                    // Line spans the boundary
-                    let boundary = split_at - line_start;
-                    let final_part = &line[..boundary.min(line.len())];
-                    let pending_part = &line[boundary.min(line.len())..];
+                    // Line spans the boundary — split at char boundary
+                    let byte_in_line = split_at - line_start;
+                    // Ensure we split on a char boundary
+                    let boundary = line.floor_char_boundary(byte_in_line);
+                    let final_part = &line[..boundary];
+                    let pending_part = &line[boundary..];
 
-                    let mut fp = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, text_alpha));
-                    fp.set_font(&[self.font_id]);
-                    fp.set_font_size(font_sz);
-                    fp.set_text_baseline(Baseline::Middle);
-                    let _ = self.canvas.fill_text(text_x, y, final_part, &fp);
-
+                    let _ = self.canvas.fill_text(text_x, y, final_part, &final_paint);
                     if !pending_part.is_empty() {
                         let final_w = self.measure_text_width(final_part, font_sz);
-                        let mut pp = Paint::color(Color::rgbaf(0.6, 0.6, 0.6, pending_alpha));
-                        pp.set_font(&[self.font_id]);
-                        pp.set_font_size(font_sz);
-                        pp.set_text_baseline(Baseline::Middle);
-                        let _ = self.canvas.fill_text(text_x + final_w, y, pending_part, &pp);
+                        let _ = self.canvas.fill_text(text_x + final_w, y, pending_part, &pend_paint);
                     }
-                }
-
-                // Account for the characters consumed (line + space separator from wrapping)
-                char_offset = line_end;
-                // Skip whitespace between wrapped lines
-                let display_bytes = display.as_bytes();
-                while char_offset < display_bytes.len() && display_bytes[char_offset] == b' ' {
-                    char_offset += 1;
                 }
             }
 
