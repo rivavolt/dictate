@@ -64,7 +64,8 @@
       devShells = forAllSystems ({ pkgs }: {
         default = pkgs.mkShell {
           nativeBuildInputs = [ pkgs.pkg-config pkgs.mold ];
-          buildInputs = [ pkgs.alsa-lib pkgs.openssl pkgs.libxkbcommon pkgs.wayland ];
+          buildInputs = [ pkgs.alsa-lib pkgs.openssl pkgs.libxkbcommon pkgs.wayland pkgs.libglvnd ];
+          LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.libglvnd pkgs.wayland ]}";
           RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
         };
       });
@@ -72,14 +73,25 @@
       packages = forAllSystems ({ pkgs }: let
         craneLib = crane.mkLib pkgs;
       in {
-        default = craneLib.buildPackage {
-          src = craneLib.cleanCargoSource ./.;
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.alsa-lib pkgs.openssl pkgs.libxkbcommon pkgs.wayland ];
-          meta = {
-            description = "Voice-to-text dictation daemon";
-            mainProgram = "dictate";
+        default = let
+          unwrapped = craneLib.buildPackage {
+            src = craneLib.cleanCargoSource ./.;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.alsa-lib pkgs.openssl pkgs.libxkbcommon pkgs.wayland ];
+            meta = {
+              description = "Voice-to-text dictation daemon";
+              mainProgram = "dictate";
+            };
           };
+        in pkgs.symlinkJoin {
+          name = "dictate-wrapped";
+          paths = [ unwrapped ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram $out/bin/dictate \
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath [ pkgs.libglvnd pkgs.wayland ]}"
+          '';
+          inherit (unwrapped) meta;
         };
       });
     };

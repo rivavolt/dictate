@@ -1,5 +1,6 @@
 use anyhow::Result;
-use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
+use femtovg::{Baseline, Canvas, Color, FontId, Paint, Path};
+use khronos_egl as egl;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
@@ -13,20 +14,17 @@ use smithay_client_toolkit::{
         },
         WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    shm::{Shm, ShmHandler},
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
-    Connection, Dispatch, QueueHandle,
-};
-use wayland_protocols_plasma::blur::client::{
-    org_kde_kwin_blur, org_kde_kwin_blur_manager,
+    protocol::{wl_output, wl_surface},
+    Connection, Proxy, QueueHandle,
 };
 
 const MIN_HEIGHT: u32 = 36;
-const PADDING_X: i32 = 16;
-const PADDING_Y: i32 = 8;
+const PADDING_X: f32 = 16.0;
+const PADDING_Y: f32 = 8.0;
 const OVERLAY_WIDTH_FRAC: f64 = 0.618;
 const CHAR_WIDTH_RATIO: f32 = 0.47;
 const CORNER_RADIUS: f32 = 12.0;
@@ -34,6 +32,8 @@ const FADE_DURATION_MS: f32 = 150.0;
 const SHRINK_DURATION_MS: f32 = 150.0;
 const WIDTH_ANIM_MS: f32 = 100.0;
 const DOT_RADIUS: f32 = 4.0;
+const SHADOW_FEATHER: f32 = 20.0;
+const SHADOW_OFFSET_Y: f32 = 4.0;
 
 pub enum Command {
     Show,
@@ -80,19 +80,11 @@ pub fn spawn(font: String) -> Result<Handle> {
     Ok(handle)
 }
 
-fn blend_over(
-    dst: tiny_skia::PremultipliedColorU8,
-    src: tiny_skia::PremultipliedColorU8,
-) -> tiny_skia::PremultipliedColorU8 {
-    let sa = src.alpha() as u32;
-    let inv = 255 - sa;
-    tiny_skia::PremultipliedColorU8::from_rgba(
-        ((src.red() as u32 * 255 + dst.red() as u32 * inv) / 255) as u8,
-        ((src.green() as u32 * 255 + dst.green() as u32 * inv) / 255) as u8,
-        ((src.blue() as u32 * 255 + dst.blue() as u32 * inv) / 255) as u8,
-        ((sa * 255 + dst.alpha() as u32 * inv) / 255) as u8,
-    )
-    .unwrap()
+fn find_font_path(font_name: &str) -> Result<String> {
+    let output = std::process::Command::new("fc-match")
+        .args(["--format", "%{file}", font_name])
+        .output()?;
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()> {
@@ -119,31 +111,68 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.commit();
 
-    // Request background blur from compositor (KDE blur protocol, supported by Hyprland)
-    if let Ok(blur_mgr) = globals.bind::<org_kde_kwin_blur_manager::OrgKdeKwinBlurManager, _, _>(&qh, 1..=1, ()) {
-        let blur = blur_mgr.create(layer.wl_surface(), &qh, ());
-        blur.set_region(None); // blur entire surface
-        blur.commit();
-    }
+    // EGL setup
+    let egl_lib = unsafe { egl::DynamicInstance::<egl::EGL1_4>::load_required()? };
 
-    let pool = SlotPool::new(256, &shm)?;
-    let mut font_system = FontSystem::new();
-    let swash_cache = SwashCache::new();
-    let text_buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 24.0));
+    let wl_display = conn.backend().display_ptr() as *mut std::ffi::c_void;
+    let egl_display = unsafe {
+        egl_lib.get_display(wl_display as egl::NativeDisplayType)
+    }.ok_or_else(|| anyhow::anyhow!("EGL: no display"))?;
+    egl_lib.initialize(egl_display)?;
+
+    let config_attribs = [
+        egl::RED_SIZE, 8,
+        egl::GREEN_SIZE, 8,
+        egl::BLUE_SIZE, 8,
+        egl::ALPHA_SIZE, 8,
+        egl::SURFACE_TYPE, egl::WINDOW_BIT,
+        egl::RENDERABLE_TYPE, egl::OPENGL_ES2_BIT,
+        egl::NONE,
+    ];
+    let egl_config = egl_lib.choose_first_config(egl_display, &config_attribs)?
+        .ok_or_else(|| anyhow::anyhow!("EGL: no config"))?;
+
+    let context_attribs = [
+        egl::CONTEXT_CLIENT_VERSION, 2,
+        egl::NONE,
+    ];
+    let egl_context = egl_lib.create_context(egl_display, egl_config, None, &context_attribs)?;
+
+    let wl_egl_surface = wayland_egl::WlEglSurface::new(
+        layer.wl_surface().id(),
+        MIN_HEIGHT as i32,
+        MIN_HEIGHT as i32,
+    )?;
+
+    let egl_surface = unsafe {
+        egl_lib.create_window_surface(egl_display, egl_config, wl_egl_surface.ptr() as egl::NativeWindowType, None)?
+    };
+
+    egl_lib.make_current(egl_display, Some(egl_surface), Some(egl_surface), Some(egl_context))?;
+
+    let renderer = unsafe {
+        femtovg::renderer::OpenGl::new_from_function(|s| {
+            egl_lib.get_proc_address(s).map(|f| f as *const _).unwrap_or(std::ptr::null())
+        })?
+    };
+    let mut canvas = Canvas::new(renderer)?;
+
+    // Load font
+    let font_path = find_font_path(font_name)?;
+    let font_id = canvas.add_font(&font_path)?;
+    tracing::debug!("overlay: loaded font {font_name} from {font_path}");
 
     let mut state = State {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
         shm,
-        pool,
         layer,
-        font_system,
-        swash_cache,
-        text_buffer,
-        pixmap: None,
-        pixmap_w: 0,
-        pixmap_h: 0,
-        font_name: font_name.to_string(),
+        egl_lib,
+        egl_display,
+        egl_surface,
+        wl_egl_surface,
+        canvas,
+        font_id,
         text: String::new(),
         pending: String::new(),
         listening: false,
@@ -253,7 +282,6 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     state.pending.clear();
                     state.fade_alpha = 1.0;
                     state.fade_target = 1.0;
-                    // Start render_w at pill size — will be computed properly in redraw
                     let pill_w = MIN_HEIGHT as f32 * state.scale as f32;
                     state.content_pw = pill_w;
                     state.render_w = pill_w;
@@ -304,15 +332,13 @@ struct State {
     registry_state: RegistryState,
     output_state: OutputState,
     shm: Shm,
-    pool: SlotPool,
     layer: LayerSurface,
-    font_system: FontSystem,
-    swash_cache: SwashCache,
-    text_buffer: Buffer,
-    pixmap: Option<tiny_skia::Pixmap>,
-    pixmap_w: u32,
-    pixmap_h: u32,
-    font_name: String,
+    egl_lib: egl::DynamicInstance<egl::EGL1_4>,
+    egl_display: egl::Display,
+    egl_surface: egl::Surface,
+    wl_egl_surface: wayland_egl::WlEglSurface,
+    canvas: Canvas<femtovg::renderer::OpenGl>,
+    font_id: FontId,
     text: String,
     pending: String,
     listening: bool,
@@ -362,45 +388,64 @@ impl State {
         full
     }
 
+    fn measure_text_width(&self, text: &str, font_size: f32) -> f32 {
+        let mut paint = Paint::default();
+        paint.set_font(&[self.font_id]);
+        paint.set_font_size(font_size);
+        self.canvas.measure_text(0.0, 0.0, text, &paint)
+            .map(|m| m.width())
+            .unwrap_or(0.0)
+    }
+
+    fn wrap_text(&self, text: &str, max_width: f32, font_size: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut current = String::new();
+        for word in text.split_whitespace() {
+            let test = if current.is_empty() {
+                word.to_string()
+            } else {
+                format!("{current} {word}")
+            };
+            let w = self.measure_text_width(&test, font_size);
+            if w > max_width && !current.is_empty() {
+                lines.push(current);
+                current = word.to_string();
+            } else {
+                current = test;
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
     fn compute_height(&mut self) -> u32 {
         if self.listening {
             return MIN_HEIGHT;
         }
-        let s = self.scale as f32;
+        let sf = self.scale as f32;
+        let pw = (self.width * self.scale as u32) as f32;
         let display = self.display_text();
-        let font_family = Family::Name(&self.font_name);
-        let pw = self.width * self.scale as u32;
+        let font_sz = self.font_size * sf;
+        let max_text_w = pw - PADDING_X * sf * 2.0;
 
-        self.text_buffer.set_metrics(
-            &mut self.font_system,
-            Metrics::new(self.font_size * s, self.line_height * s),
-        );
-        self.text_buffer.set_text(
-            &mut self.font_system,
-            &display,
-            &Attrs::new().family(font_family),
-            Shaping::Advanced,
-        );
-        self.text_buffer.set_size(
-            &mut self.font_system,
-            Some((pw as i32 - PADDING_X * self.scale * 2) as f32),
-            None,
-        );
-        self.text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        let lines = self.wrap_text(&display, max_text_w, font_sz);
+        let num_lines = lines.len().max(1) as u32;
 
-        let lines = self.text_buffer.layout_runs().count().max(1) as u32;
-        self.content_pw = if lines > 1 {
-            pw as f32
+        // Content width: for single line, fit to text; for multi-line, full width
+        self.content_pw = if num_lines > 1 {
+            pw
         } else {
-            let widest = self.text_buffer.layout_runs()
-                .map(|run| run.line_w)
+            let widest = lines.iter()
+                .map(|l| self.measure_text_width(l, font_sz))
                 .fold(0.0f32, f32::max);
-            (widest + PADDING_X as f32 * s * 2.0)
-                .max(MIN_HEIGHT as f32 * s)
-                .min(pw as f32)
+            (widest + PADDING_X * sf * 2.0)
+                .max(MIN_HEIGHT as f32 * sf)
+                .min(pw)
         };
-        let h = PADDING_Y as u32 * 2 + lines * self.line_height as u32;
+
+        let h = PADDING_Y as u32 * 2 + num_lines * self.line_height as u32;
         h.max(MIN_HEIGHT).min(self.max_height)
     }
 
@@ -421,102 +466,58 @@ impl State {
             return;
         }
 
-        // Fully faded out — clear and mark invisible
+        let s = self.scale;
+        let sf = s as f32;
+        let pw = (self.width * s as u32) as f32;
+        let ph = (self.height * s as u32) as f32;
+
+        // Resize EGL surface
+        self.wl_egl_surface.resize(pw as i32, ph as i32, 0, 0);
+        self.canvas.set_size(pw as u32, ph as u32, 1.0);
+        self.canvas.clear_rect(0, 0, pw as u32, ph as u32, Color::rgbaf(0.0, 0.0, 0.0, 0.0));
+
+        // Fully faded out — just clear and mark invisible
         if self.fade_alpha <= 0.01 && self.fade_target <= 0.0 {
+            self.canvas.flush();
+            self.egl_lib.swap_buffers(self.egl_display, self.egl_surface).ok();
             if self.visible {
                 self.visible = false;
                 self.height = MIN_HEIGHT;
                 self.layer.set_size(0, MIN_HEIGHT);
-
-                let s = self.scale;
-                let pw = self.width * s as u32;
-                let ph = MIN_HEIGHT * s as u32;
-                let stride = pw as i32 * 4;
-                let (buffer, canvas) = self
-                    .pool
-                    .create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888)
-                    .expect("create buffer");
-                canvas.fill(0);
-                self.layer.wl_surface().set_buffer_scale(s);
-                self.layer.wl_surface().damage_buffer(0, 0, pw as i32, ph as i32);
-                buffer.attach_to(self.layer.wl_surface()).expect("attach");
-                self.layer.commit();
             }
             return;
         }
 
-        let s = self.scale;
-        let sf = s as f32;
-        let pw = self.width * s as u32;
-        let ph = self.height * s as u32;
-        let stride = pw as i32 * 4;
-
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create buffer");
-
-        // Reuse pixmap if same size, otherwise allocate
-        if self.pixmap_w != pw || self.pixmap_h != ph {
-            self.pixmap = Some(tiny_skia::Pixmap::new(pw, ph).expect("pixmap"));
-            self.pixmap_w = pw;
-            self.pixmap_h = ph;
-        }
-        let pixmap = self.pixmap.as_mut().unwrap();
-        pixmap.data_mut().fill(0);
-
-        // Background rect — shrinks to a circle during copied animation
+        // Shrink animation ease
         let ease_t = if self.shrink_t > 0.0 {
             let t = self.shrink_t.min(1.0);
-            1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t) // cubic ease-out
+            1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
         } else {
             0.0
         };
 
-        let bg_alpha = (0x99 as f32 * self.fade_alpha) as u8;
+        let bg_alpha = 0.6 * self.fade_alpha;
         let target_h = MIN_HEIGHT as f32 * sf;
-        // Measure pill label width via layout
-        let pill_label = if self.listening || self.shrink_target < 0.5 {
-            "Recording"
-        } else {
-            "Copied"
-        };
-        let target_w = {
-            let font_family = Family::Name(&self.font_name);
-            self.text_buffer.set_metrics(
-                &mut self.font_system,
-                Metrics::new(self.font_size * sf, self.line_height * sf),
-            );
-            self.text_buffer.set_text(
-                &mut self.font_system,
-                pill_label,
-                &Attrs::new().family(font_family),
-                Shaping::Advanced,
-            );
-            self.text_buffer.set_size(&mut self.font_system, None, None);
-            self.text_buffer.shape_until_scroll(&mut self.font_system, false);
-            let w = self.text_buffer.layout_runs()
-                .map(|run| run.line_w)
-                .fold(0.0f32, f32::max);
-            // Extra space for red dot indicator when recording
-            let dot_space = if self.listening || self.shrink_target < 0.5 {
-                DOT_RADIUS * sf * 2.0 + 8.0 * sf
-            } else {
-                0.0
-            };
-            w + dot_space + PADDING_X as f32 * sf * 2.0
-        }.max(target_h);
 
-        let base_w = self.render_w.min(pw as f32).max(target_h);
+        // Measure pill label
+        let is_recording_pill = self.listening || self.shrink_target < 0.5;
+        let pill_label = if is_recording_pill { "Recording" } else { "Copied" };
+        let pill_font_sz = self.font_size * sf;
+        let pill_text_w = self.measure_text_width(pill_label, pill_font_sz);
+        let dot_space = if is_recording_pill { DOT_RADIUS * sf * 2.0 + 8.0 * sf } else { 0.0 };
+        let target_w = (pill_text_w + dot_space + PADDING_X * sf * 2.0).max(target_h);
+
+        // Background rect geometry
+        let base_w = self.render_w.min(pw).max(target_h);
         let (rx, ry, rw, rh) = if ease_t > 0.0 {
             let rw = base_w + (target_w - base_w) * ease_t;
-            let rh = ph as f32 + (target_h - ph as f32) * ease_t;
-            let rx = (pw as f32 - rw) / 2.0;
-            let ry = ph as f32 - rh;
+            let rh = ph + (target_h - ph) * ease_t;
+            let rx = (pw - rw) / 2.0;
+            let ry = ph - rh;
             (rx, ry, rw, rh)
         } else {
-            let rx = (pw as f32 - base_w) / 2.0;
-            (rx, 0.0, base_w, ph as f32)
+            let rx = (pw - base_w) / 2.0;
+            (rx, 0.0, base_w, ph)
         };
 
         let r_top = if ease_t > 0.0 {
@@ -524,230 +525,186 @@ impl State {
         } else {
             CORNER_RADIUS * sf
         };
-        let r_bot = rh / 2.0 * ease_t; // 0 at start, fully rounded at end
+        let r_bot = rh / 2.0 * ease_t;
 
-        let rrect = {
-            let mut pb = tiny_skia::PathBuilder::new();
-            pb.move_to(rx + r_top, ry);
-            pb.line_to(rx + rw - r_top, ry);
-            pb.quad_to(rx + rw, ry, rx + rw, ry + r_top);
-            pb.line_to(rx + rw, ry + rh - r_bot);
-            pb.quad_to(rx + rw, ry + rh, rx + rw - r_bot, ry + rh);
-            pb.line_to(rx + r_bot, ry + rh);
-            pb.quad_to(rx, ry + rh, rx, ry + rh - r_bot);
-            pb.line_to(rx, ry + r_top);
-            pb.quad_to(rx, ry, rx + r_top, ry);
-            pb.close();
-            pb.finish().unwrap()
-        };
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color(tiny_skia::Color::from_rgba8(0x00, 0x00, 0x00, bg_alpha));
-        paint.anti_alias = true;
-        pixmap.fill_path(&rrect, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+        // Drop shadow
+        {
+            let shadow_expand = SHADOW_FEATHER * sf;
+            let mut shadow_path = Path::new();
+            shadow_path.rounded_rect_varying(
+                rx - shadow_expand, ry - shadow_expand + SHADOW_OFFSET_Y * sf,
+                rw + shadow_expand * 2.0, rh + shadow_expand * 2.0,
+                r_top + shadow_expand, r_top + shadow_expand,
+                r_bot + shadow_expand, r_bot + shadow_expand,
+            );
+            let shadow_paint = Paint::box_gradient(
+                rx, ry + SHADOW_OFFSET_Y * sf,
+                rw, rh,
+                (r_top + r_bot) / 2.0,
+                SHADOW_FEATHER * sf,
+                Color::rgbaf(0.0, 0.0, 0.0, 0.3 * self.fade_alpha),
+                Color::rgbaf(0.0, 0.0, 0.0, 0.0),
+            );
+            self.canvas.fill_path(&shadow_path, &shadow_paint);
+        }
 
-        let mut border_paint = tiny_skia::Paint::default();
-        border_paint.set_color(tiny_skia::Color::from_rgba8(0xFF, 0xFF, 0xFF, (0x15 as f32 * self.fade_alpha) as u8));
-        border_paint.anti_alias = true;
-        let mut stroke = tiny_skia::Stroke::default();
-        stroke.width = sf;
-        pixmap.stroke_path(&rrect, &border_paint, &stroke, tiny_skia::Transform::identity(), None);
+        // Background
+        {
+            let mut bg_path = Path::new();
+            bg_path.rounded_rect_varying(rx, ry, rw, rh, r_top, r_top, r_bot, r_bot);
+            let bg_paint = Paint::color(Color::rgbaf(0.0, 0.0, 0.0, bg_alpha));
+            self.canvas.fill_path(&bg_path, &bg_paint);
 
-        // Text fades based on how pill-like the rect is
+            // Border
+            let mut border_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, 0.08 * self.fade_alpha));
+            border_paint.set_line_width(sf);
+            self.canvas.stroke_path(&bg_path, &border_paint);
+        }
+
+        // Text opacity
         let text_opacity = (1.0 - ease_t * 4.0).max(0.0);
-        let text_alpha = (0xFF as f32 * self.fade_alpha * text_opacity) as u8;
-        // Pill label (Recording/Copied) visible when rect is pill-shaped
+        let text_alpha = self.fade_alpha * text_opacity;
         let pill_label_opacity = if ease_t > 0.5 { ((ease_t - 0.5) * 2.0).min(1.0) } else { 0.0 };
-        let pill_alpha = (0xFF as f32 * self.fade_alpha * pill_label_opacity) as u8;
+        let pill_alpha = self.fade_alpha * pill_label_opacity;
 
-        let show_pill = (self.listening || self.pill_countdown > 0.0 || pill_alpha > 0) && ease_t > 0.5;
+        let show_pill = (self.listening || self.pill_countdown > 0.0 || pill_alpha > 0.0) && ease_t > 0.5;
 
+        // Pill label (Recording / Copied)
         if show_pill {
             let dot_r = DOT_RADIUS * sf;
-            let is_recording = self.listening || self.shrink_target < 0.5;
-            let label = if is_recording { "Recording" } else { "Copied" };
-            let label_color = if is_recording {
-                Color::rgba(0x99, 0x99, 0x99, pill_alpha)
-            } else {
-                Color::rgba(0xCC, 0xCC, 0xCC, pill_alpha)
-            };
 
             // Red dot for recording
-            if is_recording {
+            if is_recording_pill {
                 let pulse = (self.anim_phase.sin() * 0.5 + 0.5) * 0.4 + 0.6;
-                let dot_alpha = (pulse * pill_alpha as f32) as u8;
-                let ind_x = rx + PADDING_X as f32 * sf + dot_r;
+                let dot_a = pulse * pill_alpha;
+                let ind_x = rx + PADDING_X * sf + dot_r;
                 let ind_y = ry + rh / 2.0;
-                let dot_path = {
-                    let mut pb = tiny_skia::PathBuilder::new();
-                    pb.push_circle(ind_x, ind_y, dot_r);
-                    pb.finish().unwrap()
-                };
-                let mut dot_paint = tiny_skia::Paint::default();
-                dot_paint.set_color(tiny_skia::Color::from_rgba8(0xE0, 0x40, 0x40, dot_alpha));
-                dot_paint.anti_alias = true;
-                pixmap.fill_path(&dot_path, &dot_paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
+                let mut dot_path = Path::new();
+                dot_path.circle(ind_x, ind_y, dot_r);
+                self.canvas.fill_path(&dot_path, &Paint::color(Color::rgbaf(0.88, 0.25, 0.25, dot_a)));
             }
 
-            let font_family = Family::Name(&self.font_name);
-            self.text_buffer.set_metrics(
-                &mut self.font_system,
-                Metrics::new(self.font_size * sf, self.line_height * sf),
-            );
-            self.text_buffer.set_text(
-                &mut self.font_system,
-                label,
-                &Attrs::new().family(font_family),
-                Shaping::Advanced,
-            );
-            let dot_offset = if is_recording { dot_r * 2.0 + 8.0 * sf } else { 0.0 };
-            self.text_buffer.set_size(
-                &mut self.font_system,
-                None,
-                None,
-            );
-            self.text_buffer
-                .shape_until_scroll(&mut self.font_system, false);
+            let label_color = if is_recording_pill {
+                Color::rgbaf(0.6, 0.6, 0.6, pill_alpha)
+            } else {
+                Color::rgbaf(0.8, 0.8, 0.8, pill_alpha)
+            };
+            let dot_offset = if is_recording_pill { dot_r * 2.0 + 8.0 * sf } else { 0.0 };
+            let text_x = rx + PADDING_X * sf + dot_offset;
+            let text_y = ry + rh / 2.0;
 
-            let cw = pw as i32;
-            let ch = ph as i32;
-            let text_x = rx as i32 + (PADDING_X as f32 * sf + dot_offset) as i32;
-            let text_y = ry as i32 + ((rh - self.line_height * sf) / 2.0) as i32;
-            let pixels = pixmap.pixels_mut();
-
-            self.text_buffer.draw(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                label_color,
-                |x, y, w, h, color| {
-                    let x = x + text_x;
-                    let y = y + text_y;
-                    let a = color.a();
-                    if a == 0 { return; }
-                    let a32 = a as u32;
-                    let src = tiny_skia::PremultipliedColorU8::from_rgba(
-                        ((color.r() as u32 * a32) / 255) as u8,
-                        ((color.g() as u32 * a32) / 255) as u8,
-                        ((color.b() as u32 * a32) / 255) as u8,
-                        a,
-                    ).unwrap();
-                    for row in y..(y + h as i32).min(ch) {
-                        if row < 0 { continue; }
-                        for col in x..(x + w as i32).min(cw) {
-                            if col < 0 { continue; }
-                            let idx = (row * cw + col) as usize;
-                            if idx < pixels.len() {
-                                pixels[idx] = blend_over(pixels[idx], src);
-                            }
-                        }
-                    }
-                },
-            );
+            let mut paint = Paint::color(label_color);
+            paint.set_font(&[self.font_id]);
+            paint.set_font_size(pill_font_sz);
+            paint.set_text_baseline(Baseline::Middle);
+            let _ = self.canvas.fill_text(text_x, text_y, pill_label, &paint);
         }
 
-        if text_alpha > 0 && !show_pill {
-            // Normal text rendering
-            let final_text = self.text.clone();
-            let pending_str = if self.pending.is_empty() {
-                String::new()
-            } else if self.text.is_empty() || self.text.ends_with(' ') {
-                self.pending.clone()
+        // Normal transcript text
+        if text_alpha > 0.01 && !show_pill {
+            let font_sz = self.font_size * sf;
+            let max_text_w = pw - PADDING_X * sf * 2.0;
+            let text_x = rx + PADDING_X * sf;
+
+            let final_text = &self.text;
+            let pending_text = &self.pending;
+
+            // Build display text for wrapping
+            let display = self.display_text();
+            let lines = self.wrap_text(&display, max_text_w, font_sz);
+            let num_lines = lines.len();
+            let total_text_h = num_lines as f32 * self.line_height * sf;
+            let visible_h = ph - PADDING_Y * sf * 2.0;
+            let scroll_y = (total_text_h - visible_h).max(0.0);
+
+            // Clip to background rect
+            self.canvas.save();
+            let mut clip = Path::new();
+            clip.rounded_rect_varying(rx, ry, rw, rh, r_top, r_top, r_bot, r_bot);
+            self.canvas.intersect_scissor(rx, ry, rw, rh);
+
+            // Determine where final text ends and pending starts
+            let separator = if !final_text.is_empty() && !pending_text.is_empty() && !final_text.ends_with(' ') {
+                " "
             } else {
-                format!(" {}", self.pending)
+                ""
             };
-            let font_family = Family::Name(&self.font_name);
+            let final_with_sep = format!("{final_text}{separator}");
 
-            self.text_buffer.set_metrics(
-                &mut self.font_system,
-                Metrics::new(self.font_size * sf, self.line_height * sf),
-            );
-
-            // Pending text: softer opacity pulse (30-60%)
-            let pending_alpha = if self.pending.is_empty() {
-                0
+            // Pending alpha with pulse
+            let pending_alpha = if pending_text.is_empty() {
+                0.0
             } else {
                 let pulse = self.anim_phase.sin() * 0.5 + 0.5;
-                ((0.3 + pulse * 0.3) * text_alpha as f32) as u8
+                (0.3 + pulse * 0.3) * text_alpha
             };
 
-            self.text_buffer.set_rich_text(
-                &mut self.font_system,
-                [
-                    (final_text.as_str(), Attrs::new().family(font_family).color(
-                        Color::rgba(0xFF, 0xFF, 0xFF, text_alpha)
-                    )),
-                    (pending_str.as_str(), Attrs::new().family(font_family).color(
-                        Color::rgba(0x88, 0x88, 0xAA, pending_alpha)
-                    )),
-                ],
-                &Attrs::new().family(font_family),
-                Shaping::Advanced,
-                None,
-            );
-            self.text_buffer.set_size(
-                &mut self.font_system,
-                Some((pw as i32 - PADDING_X * s * 2) as f32),
-                None,
-            );
-            self.text_buffer
-                .shape_until_scroll(&mut self.font_system, false);
+            // Render each line, coloring final vs pending portions
+            let base_y = ph - PADDING_Y * sf - total_text_h + scroll_y;
+            let mut char_offset = 0usize;
+            for (i, line) in lines.iter().enumerate() {
+                let y = base_y + (i as f32 + 0.5) * self.line_height * sf - scroll_y;
+                if y < -self.line_height * sf || y > ph + self.line_height * sf {
+                    char_offset += line.len() + 1; // +1 for the space between words
+                    continue;
+                }
 
-            let total_lines = self.text_buffer.layout_runs().count() as i32;
-            let total_text_h = total_lines as f32 * self.line_height * sf;
-            let visible_h = ph as f32 - (PADDING_Y * s * 2) as f32;
-            let scroll_y = (total_text_h - visible_h).max(0.0) as i32;
+                // Figure out which part of this line is final vs pending
+                let line_start = char_offset;
+                let line_end = char_offset + line.len();
+                let split_at = final_with_sep.len();
 
-            let cw = pw as i32;
-            let ch = ph as i32;
-            let pad_x = rx as i32 + PADDING_X * s;
-            let text_h = total_text_h.min(visible_h) as i32;
-            let pad_y = (ch - text_h) - PADDING_Y * s;
-            let pixels = pixmap.pixels_mut();
+                if line_end <= split_at {
+                    // Entire line is final text
+                    let mut paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, text_alpha));
+                    paint.set_font(&[self.font_id]);
+                    paint.set_font_size(font_sz);
+                    paint.set_text_baseline(Baseline::Middle);
+                    let _ = self.canvas.fill_text(text_x, y, line, &paint);
+                } else if line_start >= split_at {
+                    // Entire line is pending
+                    let mut paint = Paint::color(Color::rgbaf(0.53, 0.53, 0.67, pending_alpha));
+                    paint.set_font(&[self.font_id]);
+                    paint.set_font_size(font_sz);
+                    paint.set_text_baseline(Baseline::Middle);
+                    let _ = self.canvas.fill_text(text_x, y, line, &paint);
+                } else {
+                    // Line spans the boundary
+                    let boundary = split_at - line_start;
+                    let final_part = &line[..boundary.min(line.len())];
+                    let pending_part = &line[boundary.min(line.len())..];
 
-            self.text_buffer.draw(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                Color::rgba(0xFF, 0xFF, 0xFF, text_alpha),
-                |x, y, w, h, color| {
-                    let x = x + pad_x;
-                    let y = y + pad_y - scroll_y;
-                    let a = color.a();
-                    if a == 0 { return; }
-                    let a32 = a as u32;
-                    let src = tiny_skia::PremultipliedColorU8::from_rgba(
-                        ((color.r() as u32 * a32) / 255) as u8,
-                        ((color.g() as u32 * a32) / 255) as u8,
-                        ((color.b() as u32 * a32) / 255) as u8,
-                        a,
-                    ).unwrap();
-                    for row in y..(y + h as i32).min(ch) {
-                        if row < 0 { continue; }
-                        for col in x..(x + w as i32).min(cw) {
-                            if col < 0 { continue; }
-                            let idx = (row * cw + col) as usize;
-                            if idx < pixels.len() {
-                                pixels[idx] = blend_over(pixels[idx], src);
-                            }
-                        }
+                    let mut fp = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, text_alpha));
+                    fp.set_font(&[self.font_id]);
+                    fp.set_font_size(font_sz);
+                    fp.set_text_baseline(Baseline::Middle);
+                    let _ = self.canvas.fill_text(text_x, y, final_part, &fp);
+
+                    if !pending_part.is_empty() {
+                        let final_w = self.measure_text_width(final_part, font_sz);
+                        let mut pp = Paint::color(Color::rgbaf(0.53, 0.53, 0.67, pending_alpha));
+                        pp.set_font(&[self.font_id]);
+                        pp.set_font_size(font_sz);
+                        pp.set_text_baseline(Baseline::Middle);
+                        let _ = self.canvas.fill_text(text_x + final_w, y, pending_part, &pp);
                     }
-                },
-            );
+                }
+
+                // Account for the characters consumed (line + space separator from wrapping)
+                char_offset = line_end;
+                // Skip whitespace between wrapped lines
+                let display_bytes = display.as_bytes();
+                while char_offset < display_bytes.len() && display_bytes[char_offset] == b' ' {
+                    char_offset += 1;
+                }
+            }
+
+            self.canvas.restore();
         }
 
-        // Copy pixmap (RGBA) to canvas (ARGB)
-        let pixmap_data = pixmap.data();
-        for (chunk, rgba) in canvas.chunks_exact_mut(4).zip(pixmap_data.chunks_exact(4)) {
-            chunk[0] = rgba[2]; // B
-            chunk[1] = rgba[1]; // G
-            chunk[2] = rgba[0]; // R
-            chunk[3] = rgba[3]; // A
-        }
-
+        self.canvas.flush();
+        self.egl_lib.swap_buffers(self.egl_display, self.egl_surface).ok();
         self.layer.wl_surface().set_buffer_scale(s);
-        self.layer
-            .wl_surface()
-            .damage_buffer(0, 0, pw as i32, ph as i32);
-        buffer.attach_to(self.layer.wl_surface()).expect("attach");
-        self.layer.commit();
     }
 }
 
@@ -804,7 +761,7 @@ impl LayerShellHandler for State {
             let overlay_w = (w as f64 * OVERLAY_WIDTH_FRAC) as u32;
             let margin_h = ((w - overlay_w) / 2) as i32;
             let margin_b = 32;
-            let content_w = overlay_w as f32 - PADDING_X as f32 * 2.0;
+            let content_w = overlay_w as f32 - PADDING_X * 2.0;
             self.font_size = content_w / (100.0 * CHAR_WIDTH_RATIO);
             self.line_height = self.font_size * 1.5;
             self.max_height = (overlay_w as f64 * OVERLAY_WIDTH_FRAC) as u32;
@@ -833,14 +790,6 @@ delegate_output!(State);
 delegate_shm!(State);
 delegate_layer!(State);
 delegate_registry!(State);
-
-impl Dispatch<org_kde_kwin_blur_manager::OrgKdeKwinBlurManager, ()> for State {
-    fn event(_: &mut Self, _: &org_kde_kwin_blur_manager::OrgKdeKwinBlurManager, _: <org_kde_kwin_blur_manager::OrgKdeKwinBlurManager as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
-}
-
-impl Dispatch<org_kde_kwin_blur::OrgKdeKwinBlur, ()> for State {
-    fn event(_: &mut Self, _: &org_kde_kwin_blur::OrgKdeKwinBlur, _: <org_kde_kwin_blur::OrgKdeKwinBlur as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
-}
 
 impl ProvidesRegistryState for State {
     fn registry(&mut self) -> &mut RegistryState {
