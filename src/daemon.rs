@@ -57,9 +57,7 @@ struct DaemonState {
 }
 
 impl DaemonState {
-    fn new(tray_handle: Option<ksni::Handle<tray::DictateTray>>, overlay: overlay::Handle) -> Self {
-        let config = Config::new();
-        let state = State::load(&config);
+    fn new(config: Config, state: State, tray_handle: Option<ksni::Handle<tray::DictateTray>>, overlay: overlay::Handle) -> Self {
         Self {
             config,
             state,
@@ -131,7 +129,6 @@ impl DaemonState {
                     match event {
                         TranscriptEvent::Final { delta, accumulated } => {
                             tracing::info!("transcript: {delta}");
-                            output::copy_to_clipboard(&accumulated);
                             if is_clipboard {
                                 overlay_handle.set_text(accumulated.clone());
                             } else {
@@ -164,6 +161,9 @@ impl DaemonState {
                         output::copy_to_clipboard(&last_accumulated);
                     }
                     let _ = std::fs::write(&transcript_file, &last_accumulated);
+                }
+                if !last_accumulated.is_empty() {
+                    output::copy_to_clipboard(&last_accumulated);
                 }
                 output::append_history(&history_file, &last_accumulated);
                 if is_clipboard {
@@ -247,12 +247,23 @@ impl DaemonState {
 
             while !stop.load(Ordering::Relaxed) {
                 let chunk = audio_file.clone();
+                let stop2 = stop.clone();
                 let status = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("sox")
+                    let mut child = std::process::Command::new("sox")
                         .args(["-d", &chunk.to_string_lossy()])
                         .args(["silence", "1", "0.1", "1%", "1", "0.8", "1%"])
                         .stderr(std::process::Stdio::null())
-                        .status()
+                        .spawn()?;
+                    loop {
+                        match child.try_wait()? {
+                            Some(status) => return Ok(status),
+                            None if stop2.load(Ordering::Relaxed) => {
+                                let _ = child.kill();
+                                return child.wait();
+                            }
+                            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        }
+                    }
                 })
                 .await;
 
@@ -307,7 +318,7 @@ impl DaemonState {
 
         if let Some(handle) = self.record_handle.take() {
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(6), handle).await;
+                let _ = handle.await;
             });
         }
 
@@ -527,10 +538,8 @@ pub async fn run() -> Result<()> {
 
     let config = Config::new();
     let state = State::load(&config);
-
     let overlay_handle = overlay::spawn(state.font.clone())?;
-
-    let mut daemon = DaemonState::new(tray_handle, overlay_handle);
+    let mut daemon = DaemonState::new(config, state, tray_handle, overlay_handle);
 
     tracing::info!(
         "starting daemon (mode: {}, lang: {}, model: {})",
