@@ -26,7 +26,7 @@ pub async fn transcribe_file(path: &Path, lang: &str, model: &str) -> Result<Str
         form = form.text("language", lang.to_string());
     }
 
-    let resp = reqwest::Client::new()
+    let resp = config::http_client()
         .post("https://api.groq.com/openai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {api_key}"))
         .multipart(form)

@@ -169,6 +169,16 @@ pub fn parse_provider_model(s: &str) -> (&str, &str) {
     }
 }
 
+pub fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("http client")
+    })
+}
+
 pub fn get_api_key(provider: &str) -> Result<String> {
     let env_var = match provider {
         "deepgram" => "DEEPGRAM_API_KEY",
