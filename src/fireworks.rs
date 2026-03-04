@@ -28,13 +28,17 @@ pub async fn stream_live(
     state: &config::State,
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
-    _sample_rate: u32,
+    sample_rate: u32,
     tx: mpsc::UnboundedSender<TranscriptEvent>,
 ) -> Result<()> {
     let api_key = config::get_api_key("fireworks")?;
     let (_, model) = config::parse_provider_model(&state.model);
 
-    let mut params = vec![format!("model={model}")];
+    let mut params = vec![
+        format!("model={model}"),
+        format!("sample_rate={sample_rate}"),
+        format!("encoding=pcm_s16le"),
+    ];
     if !state.lang.is_empty() && state.lang != config::AUTO_LANG {
         params.push(format!("language={}", state.lang));
     }
@@ -201,7 +205,7 @@ pub async fn transcribe_file(path: &Path, lang: &str, model: &str) -> Result<Str
         form = form.text("language", lang.to_string());
     }
 
-    let resp = reqwest::Client::new()
+    let resp = config::http_client()
         .post("https://audio-prod.api.fireworks.ai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {api_key}"))
         .multipart(form)
