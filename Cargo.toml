@@ -20,3 +20,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ksni = "0.3.3"
 wrtype = "0.1"
+smithay-client-toolkit = { version = "0.20", features = ["calloop"] }
+wayland-client = "0.31"
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+cosmic-text = "0.14"
+wl-clipboard-rs = "0.9"

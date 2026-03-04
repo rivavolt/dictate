@@ -1,7 +1,6 @@
-use std::io::Write;
-use std::process::Command;
 use std::sync::Mutex;
 
+use wl_clipboard_rs::copy::{MimeType, Options, Source};
 use wrtype::WrtypeClient;
 
 static CLIENT: std::sync::OnceLock<Mutex<WrtypeClient>> = std::sync::OnceLock::new();
@@ -23,37 +22,11 @@ pub fn type_text(text: &str) {
 }
 
 pub fn copy_to_clipboard(text: &str) {
-    if let Ok(mut child) = Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(text.as_bytes());
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        let opts = Options::new();
+        if let Err(e) = opts.copy(Source::Bytes(text.into_bytes().into()), MimeType::Text) {
+            tracing::error!("clipboard copy failed: {e}");
         }
-        let _ = child.wait();
-    }
-}
-
-pub fn notify(body: &str) {
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Dictate",
-            "--hint=string:x-canonical-private-synchronous:dictate",
-            "-t", "0",
-            "Dictate",
-            body,
-        ])
-        .status();
-}
-
-pub fn notify_dismiss() {
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Dictate",
-            "--hint=string:x-canonical-private-synchronous:dictate",
-            "-t", "3000",
-            "Dictate",
-            "Copied to clipboard",
-        ])
-        .status();
+    });
 }

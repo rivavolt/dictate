@@ -10,6 +10,7 @@ use crate::deepgram;
 use crate::fnkey;
 use crate::ipc;
 use crate::output;
+use crate::overlay;
 use crate::sound;
 use crate::tray;
 
@@ -18,14 +19,14 @@ struct DaemonState {
     state: State,
     recording: bool,
     stop_flag: Option<Arc<AtomicBool>>,
-    /// Keep the cpal Stream alive while recording in live mode
     _audio_stream: Option<cpal::Stream>,
     record_handle: Option<tokio::task::JoinHandle<()>>,
     tray_handle: ksni::Handle<tray::DictateTray>,
+    overlay: overlay::Handle,
 }
 
 impl DaemonState {
-    fn new(tray_handle: ksni::Handle<tray::DictateTray>) -> Self {
+    fn new(tray_handle: ksni::Handle<tray::DictateTray>, overlay: overlay::Handle) -> Self {
         let config = Config::new();
         let state = State::load(&config);
         Self {
@@ -36,6 +37,7 @@ impl DaemonState {
             _audio_stream: None,
             record_handle: None,
             tray_handle,
+            overlay,
         }
     }
 
@@ -50,7 +52,7 @@ impl DaemonState {
         let tray = self.tray_handle.clone();
         tokio::spawn(async move { tray.update(|t| t.set_recording(true)).await; });
         if self.state.output == "clipboard" {
-            output::notify("Recording...");
+            self.overlay.show();
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -71,8 +73,9 @@ impl DaemonState {
         self._audio_stream = Some(stream);
 
         let state = self.state.clone();
+        let overlay = self.overlay.clone();
         self.record_handle = Some(tokio::spawn(async move {
-            if let Err(e) = deepgram::stream_live(&state, audio_rx, stop, sample_rate).await {
+            if let Err(e) = deepgram::stream_live(&state, audio_rx, stop, sample_rate, overlay).await {
                 tracing::error!("live streaming error: {e}");
             }
         }));
@@ -108,7 +111,6 @@ impl DaemonState {
                 Ok(transcript) if !transcript.is_empty() => {
                     if state.output == "clipboard" {
                         output::copy_to_clipboard(&transcript);
-                        output::notify_dismiss();
                     } else {
                         output::type_text(&transcript);
                         output::copy_to_clipboard(&transcript);
@@ -161,7 +163,6 @@ impl DaemonState {
                             full_transcript.push_str(&transcript);
                             full_transcript.push(' ');
                             output::copy_to_clipboard(&full_transcript);
-                            output::notify(&full_transcript);
                         } else {
                             output::type_text(&transcript);
                             full_transcript.push_str(&transcript);
@@ -206,7 +207,7 @@ impl DaemonState {
         let tray = self.tray_handle.clone();
         tokio::spawn(async move { tray.update(|t| t.set_recording(false)).await; });
         if self.state.output == "clipboard" {
-            output::notify_dismiss();
+            self.overlay.hide();
         }
 
         Ok("stopped".into())
@@ -300,7 +301,10 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    let mut daemon = DaemonState::new(tray_handle);
+    // Spawn overlay
+    let overlay_handle = overlay::spawn()?;
+
+    let mut daemon = DaemonState::new(tray_handle, overlay_handle);
 
     tracing::info!(
         "starting daemon (mode: {}, lang: {}, model: {})",

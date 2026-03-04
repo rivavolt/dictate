@@ -41,7 +41,7 @@
 
               serviceConfig = {
                 Environment = [
-                  "PATH=${lib.makeBinPath [ pkgs.wl-clipboard pkgs.pipewire pkgs.sox pkgs.libnotify ]}"
+                  "PATH=${lib.makeBinPath [ pkgs.wl-clipboard pkgs.pipewire pkgs.sox ]}"
                   "XDG_RUNTIME_DIR=/run/user/%U"
                 ];
                 Type = "simple";

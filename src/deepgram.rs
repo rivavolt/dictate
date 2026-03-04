@@ -9,6 +9,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config;
 use crate::output;
+use crate::overlay;
 
 #[derive(Serialize, Deserialize)]
 struct LiveResponse {
@@ -33,6 +34,7 @@ pub async fn stream_live(
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     sample_rate: u32,
+    overlay: overlay::Handle,
 ) -> Result<()> {
     let api_key = config::get_api_key()?;
 
@@ -79,6 +81,7 @@ pub async fn stream_live(
     let transcript_file = cfg.transcript_file.clone();
     let mut full_transcript = String::new();
     let output_mode = state.output.clone();
+    let overlay_handle = overlay.clone();
 
     let receiver_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
@@ -102,15 +105,13 @@ pub async fn stream_live(
             }
 
             tracing::info!("transcript: {}", alt.transcript);
+            full_transcript.push_str(&alt.transcript);
+            full_transcript.push(' ');
             if output_mode == "clipboard" {
-                full_transcript.push_str(&alt.transcript);
-                full_transcript.push(' ');
                 output::copy_to_clipboard(&full_transcript);
-                output::notify(&full_transcript);
+                overlay_handle.set_text(full_transcript.clone());
             } else {
                 output::type_text(&alt.transcript);
-                full_transcript.push_str(&alt.transcript);
-                full_transcript.push(' ');
                 output::copy_to_clipboard(&full_transcript);
             }
             let _ = std::fs::write(&transcript_file, &full_transcript);

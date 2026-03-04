@@ -5,6 +5,7 @@ mod deepgram;
 mod fnkey;
 mod ipc;
 mod output;
+mod overlay;
 mod sound;
 mod tray;
 
