@@ -174,6 +174,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         font_id,
         text: String::new(),
         pending: String::new(),
+        wrapped_lines: Vec::new(),
+        wrapped_dirty: true,
         listening: false,
         shrink_t: 0.0,
         shrink_target: 0.0,
@@ -279,6 +281,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     state.pill_countdown = 0.0;
                     state.text.clear();
                     state.pending.clear();
+                    state.wrapped_dirty = true;
                     state.fade_alpha = 1.0;
                     state.fade_target = 1.0;
                     let pill_w = PILL_SIZE as f32 * state.scale as f32;
@@ -293,6 +296,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     state.listening = false;
                     state.text = text;
                     state.pending.clear();
+                    state.wrapped_dirty = true;
                     if state.visible {
                         state.resize_and_redraw();
                     }
@@ -303,6 +307,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     }
                     state.listening = false;
                     state.pending = text;
+                    state.wrapped_dirty = true;
                     if state.visible {
                         state.resize_and_redraw();
                     }
@@ -340,6 +345,8 @@ struct State {
     font_id: FontId,
     text: String,
     pending: String,
+    wrapped_lines: Vec<String>,
+    wrapped_dirty: bool,
     listening: bool,
     shrink_t: f32,
     shrink_target: f32,
@@ -458,24 +465,35 @@ impl State {
         self.canvas.stroke_path(&check, &paint);
     }
 
+    fn rewrap_if_dirty(&mut self) {
+        if !self.wrapped_dirty {
+            return;
+        }
+        self.wrapped_dirty = false;
+        let sf = self.scale as f32;
+        let pw = (self.width * self.scale as u32) as f32;
+        let display = self.display_text();
+        let font_sz = self.font_size * sf;
+        let max_text_w = pw - PADDING_X * sf * 2.0;
+        self.wrapped_lines = self.wrap_text(&display, max_text_w, font_sz);
+    }
+
     fn compute_height(&mut self) -> u32 {
         if self.listening {
             return PILL_SIZE;
         }
         let sf = self.scale as f32;
         let pw = (self.width * self.scale as u32) as f32;
-        let display = self.display_text();
         let font_sz = self.font_size * sf;
-        let max_text_w = pw - PADDING_X * sf * 2.0;
 
-        let lines = self.wrap_text(&display, max_text_w, font_sz);
-        let num_lines = lines.len().max(1) as u32;
+        self.rewrap_if_dirty();
+        let num_lines = self.wrapped_lines.len().max(1) as u32;
 
         // Content width: for single line, fit to text; for multi-line, full width
         self.content_pw = if num_lines > 1 {
             pw
         } else {
-            let widest = lines.iter()
+            let widest = self.wrapped_lines.iter()
                 .map(|l| self.measure_text_width(l, font_sz))
                 .fold(0.0f32, f32::max);
             (widest + PADDING_X * sf * 2.0)
@@ -534,7 +552,7 @@ impl State {
             0.0
         };
 
-        let bg_alpha = 0.6 * self.fade_alpha;
+        let bg_alpha = 0.8 * self.fade_alpha;
         let target_h = PILL_SIZE as f32 * sf;
 
         // Pill shrinks to a circle for both recording and copied icons
@@ -623,16 +641,11 @@ impl State {
         // Normal transcript text
         if text_alpha > 0.01 && !show_pill {
             let font_sz = self.font_size * sf;
-            let max_text_w = pw - PADDING_X * sf * 2.0;
             let text_x = rx + PADDING_X * sf;
 
-            let final_text = &self.text;
-            let pending_text = &self.pending;
-
-            // Build display text for wrapping
+            self.rewrap_if_dirty();
             let display = self.display_text();
-            let lines = self.wrap_text(&display, max_text_w, font_sz);
-            let num_lines = lines.len();
+            let num_lines = self.wrapped_lines.len();
             let total_text_h = num_lines as f32 * self.line_height * sf;
             let visible_h = ph - PADDING_Y * sf * 2.0;
             let scroll_y = (total_text_h - visible_h).max(0.0);
@@ -644,19 +657,19 @@ impl State {
             self.canvas.intersect_scissor(rx, ry, rw, rh);
 
             // Determine where final text ends and pending starts
-            let separator = if !final_text.is_empty() && !pending_text.is_empty() && !final_text.ends_with(' ') {
+            let separator = if !self.text.is_empty() && !self.pending.is_empty() && !self.text.ends_with(' ') {
                 " "
             } else {
                 ""
             };
-            let final_with_sep = format!("{final_text}{separator}");
+            let final_with_sep = format!("{}{separator}", self.text);
 
             let pending_alpha = text_alpha * 0.5;
 
             // Render each line, coloring final vs pending portions
             let base_y = ph - PADDING_Y * sf - total_text_h + scroll_y;
             let mut char_offset = 0usize;
-            for (i, line) in lines.iter().enumerate() {
+            for (i, line) in self.wrapped_lines.iter().enumerate() {
                 let y = base_y + (i as f32 + 0.5) * self.line_height * sf - scroll_y;
                 if y < -self.line_height * sf || y > ph + self.line_height * sf {
                     char_offset += line.len() + 1; // +1 for the space between words
