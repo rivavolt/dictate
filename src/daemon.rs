@@ -118,6 +118,7 @@ impl DaemonState {
 
         let output_mode = self.state.output.clone();
         let transcript_file = self.config.transcript_file.clone();
+        let history_file = self.config.history_file.clone();
         let overlay_handle = self.overlay.clone();
         let state = self.state.clone();
         let provider = provider.to_string();
@@ -164,6 +165,7 @@ impl DaemonState {
                     }
                     let _ = std::fs::write(&transcript_file, &last_accumulated);
                 }
+                output::append_history(&history_file, &last_accumulated);
                 if is_clipboard {
                     overlay_handle.copied();
                 }
@@ -191,6 +193,7 @@ impl DaemonState {
         let audio_file = self.config.audio_file.clone();
         let state = self.state.clone();
         let transcript_file = self.config.transcript_file.clone();
+        let history_file = self.config.history_file.clone();
         let provider = provider.to_string();
 
         self.record_handle = Some(tokio::spawn(async move {
@@ -219,6 +222,7 @@ impl DaemonState {
                         output::type_text(&transcript);
                     }
                     let _ = fs::write(&transcript_file, &transcript);
+                    output::append_history(&history_file, &transcript);
                 }
                 Err(e) => tracing::error!("batch transcribe error: {e}"),
                 _ => {}
@@ -234,6 +238,7 @@ impl DaemonState {
         let audio_file = self.config.audio_file.with_extension("chunk.wav");
         let state = self.state.clone();
         let transcript_file = self.config.transcript_file.clone();
+        let history_file = self.config.history_file.clone();
         let provider = provider.to_string();
 
         self.record_handle = Some(tokio::spawn(async move {
@@ -284,6 +289,7 @@ impl DaemonState {
             }
 
             let _ = fs::remove_file(&audio_file);
+            output::append_history(&history_file, full_transcript.trim());
         }));
 
         Ok(())

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Mutex;
 
 use wl_clipboard_rs::copy::{MimeType, Options, Source};
@@ -27,6 +28,19 @@ pub fn type_text(text: &str) {
                 }
             }
         }
+    }
+}
+
+pub fn append_history(path: &std::path::Path, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{secs}] {text}");
     }
 }
 

@@ -132,6 +132,7 @@ pub struct Config {
     pub output_file: PathBuf,
     pub font_file: PathBuf,
     pub model_file: PathBuf,
+    pub history_file: PathBuf,
     pub socket_path: PathBuf,
 }
 
@@ -154,6 +155,7 @@ impl Config {
             output_file: state_dir.join("output"),
             font_file: state_dir.join("font"),
             model_file: state_dir.join("model"),
+            history_file: state_dir.join("history.log"),
             socket_path: runtime_dir.join("dictate.sock"),
         }
     }
