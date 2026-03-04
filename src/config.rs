@@ -117,10 +117,15 @@ pub fn provider_models(provider: &str) -> &'static [&'static str] {
     }
 }
 
+pub const ALL_MODELS: &[&str] = &[
+    "deepgram/nova-3", "deepgram/nova-2", "deepgram/nova-2-general",
+    "deepgram/whisper-large", "deepgram/whisper-medium", "deepgram/whisper-small", "deepgram/whisper-tiny",
+    "groq/whisper-large-v3-turbo", "groq/whisper-large-v3", "groq/distil-whisper-large-v3-en",
+    "fireworks/fireworks-asr-large", "fireworks/whisper-v3-turbo", "fireworks/whisper-v3",
+];
+
 pub fn all_models() -> Vec<String> {
-    PROVIDERS.iter().flat_map(|p| {
-        provider_models(p).iter().map(move |m| format!("{p}/{m}"))
-    }).collect()
+    ALL_MODELS.iter().map(|s| s.to_string()).collect()
 }
 
 pub struct Config {

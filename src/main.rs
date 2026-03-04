@@ -36,15 +36,27 @@ enum Commands {
     /// Show current status
     Status,
     /// Set or show transcription mode (live, batch, vad)
-    Mode { mode: Option<String> },
+    Mode {
+        #[arg(value_parser = ["live", "batch", "vad"])]
+        mode: Option<String>,
+    },
     /// Set or show language
-    Lang { lang: Option<String> },
+    Lang {
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(config::LANGUAGES.iter().map(|(c, _)| *c)))]
+        lang: Option<String>,
+    },
     /// Set or show output method (type, clipboard)
-    Output { output: Option<String> },
+    Output {
+        #[arg(value_parser = ["type", "clipboard"])]
+        output: Option<String>,
+    },
     /// Set or show overlay font (e.g. "Inter", "JetBrains Mono")
     Font { font: Option<String> },
     /// Set or show model (provider/model). Providers: deepgram, groq, fireworks
-    Model { model: Option<String> },
+    Model {
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(config::ALL_MODELS))]
+        model: Option<String>,
+    },
     /// Generate shell completions
     Completions { shell: Shell },
 }
