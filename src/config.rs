@@ -8,6 +8,7 @@ pub struct Config {
     pub audio_file: PathBuf,
     pub lang_file: PathBuf,
     pub mode_file: PathBuf,
+    pub output_file: PathBuf,
     pub socket_path: PathBuf,
 }
 
@@ -27,6 +28,7 @@ impl Config {
             audio_file: runtime_dir.join("dictate.wav"),
             lang_file: state_dir.join("language"),
             mode_file: state_dir.join("mode"),
+            output_file: state_dir.join("output"),
             socket_path: runtime_dir.join("dictate.sock"),
         }
     }
@@ -57,6 +59,7 @@ pub struct State {
     pub lang: String,
     pub model: String,
     pub mode: String,
+    pub output: String,
 }
 
 impl State {
@@ -73,6 +76,10 @@ impl State {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "live".to_string());
 
-        Self { lang, model, mode }
+        let output = fs::read_to_string(&config.output_file)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "type".to_string());
+
+        Self { lang, model, mode, output }
     }
 }

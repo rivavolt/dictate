@@ -33,3 +33,27 @@ pub fn copy_to_clipboard(text: &str) {
         let _ = child.wait();
     }
 }
+
+pub fn notify(body: &str) {
+    let _ = Command::new("notify-send")
+        .args([
+            "--app-name=Dictate",
+            "--hint=string:x-canonical-private-synchronous:dictate",
+            "-t", "0",
+            "Dictate",
+            body,
+        ])
+        .status();
+}
+
+pub fn notify_dismiss() {
+    let _ = Command::new("notify-send")
+        .args([
+            "--app-name=Dictate",
+            "--hint=string:x-canonical-private-synchronous:dictate",
+            "-t", "3000",
+            "Dictate",
+            "Copied to clipboard",
+        ])
+        .status();
+}

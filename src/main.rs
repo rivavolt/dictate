@@ -34,6 +34,8 @@ enum Commands {
     Mode { mode: Option<String> },
     /// Set or show language
     Lang { lang: Option<String> },
+    /// Set or show output method (type, clipboard)
+    Output { output: Option<String> },
 }
 
 #[tokio::main]
@@ -76,6 +78,10 @@ async fn main() -> Result<()> {
                 Commands::Lang { lang } => ipc::Request {
                     command: "lang".into(),
                     arg: lang,
+                },
+                Commands::Output { output } => ipc::Request {
+                    command: "output".into(),
+                    arg: output,
                 },
                 Commands::Daemon => unreachable!(),
             };

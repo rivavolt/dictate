@@ -78,6 +78,7 @@ pub async fn stream_live(
     let cfg = config::Config::new();
     let transcript_file = cfg.transcript_file.clone();
     let mut full_transcript = String::new();
+    let output_mode = state.output.clone();
 
     let receiver_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
@@ -101,11 +102,18 @@ pub async fn stream_live(
             }
 
             tracing::info!("transcript: {}", alt.transcript);
-            output::type_text(&alt.transcript);
-            full_transcript.push_str(&alt.transcript);
-            full_transcript.push(' ');
+            if output_mode == "clipboard" {
+                full_transcript.push_str(&alt.transcript);
+                full_transcript.push(' ');
+                output::copy_to_clipboard(&full_transcript);
+                output::notify(&full_transcript);
+            } else {
+                output::type_text(&alt.transcript);
+                full_transcript.push_str(&alt.transcript);
+                full_transcript.push(' ');
+                output::copy_to_clipboard(&full_transcript);
+            }
             let _ = std::fs::write(&transcript_file, &full_transcript);
-            output::copy_to_clipboard(&full_transcript);
         }
     });
 

@@ -49,6 +49,9 @@ impl DaemonState {
         sound::play_start();
         let tray = self.tray_handle.clone();
         tokio::spawn(async move { tray.update(|t| t.set_recording(true)).await; });
+        if self.state.output == "clipboard" {
+            output::notify("Recording...");
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         self.stop_flag = Some(stop.clone());
@@ -103,9 +106,14 @@ impl DaemonState {
             // Transcribe
             match deepgram::transcribe_file(&audio_file, &state.lang, &state.model).await {
                 Ok(transcript) if !transcript.is_empty() => {
-                    output::type_text(&transcript);
+                    if state.output == "clipboard" {
+                        output::copy_to_clipboard(&transcript);
+                        output::notify_dismiss();
+                    } else {
+                        output::type_text(&transcript);
+                        output::copy_to_clipboard(&transcript);
+                    }
                     let _ = fs::write(&transcript_file, &transcript);
-                    output::copy_to_clipboard(&transcript);
                 }
                 Err(e) => tracing::error!("batch transcribe error: {e}"),
                 _ => {}
@@ -149,11 +157,18 @@ impl DaemonState {
 
                 match deepgram::transcribe_file(&audio_file, &state.lang, &state.model).await {
                     Ok(transcript) if !transcript.is_empty() => {
-                        output::type_text(&transcript);
-                        full_transcript.push_str(&transcript);
-                        full_transcript.push(' ');
+                        if state.output == "clipboard" {
+                            full_transcript.push_str(&transcript);
+                            full_transcript.push(' ');
+                            output::copy_to_clipboard(&full_transcript);
+                            output::notify(&full_transcript);
+                        } else {
+                            output::type_text(&transcript);
+                            full_transcript.push_str(&transcript);
+                            full_transcript.push(' ');
+                            output::copy_to_clipboard(&full_transcript);
+                        }
                         let _ = fs::write(&transcript_file, &full_transcript);
-                        output::copy_to_clipboard(&full_transcript);
                     }
                     Err(e) => tracing::error!("vad transcribe error: {e}"),
                     _ => {}
@@ -190,6 +205,9 @@ impl DaemonState {
         sound::play_stop();
         let tray = self.tray_handle.clone();
         tokio::spawn(async move { tray.update(|t| t.set_recording(false)).await; });
+        if self.state.output == "clipboard" {
+            output::notify_dismiss();
+        }
 
         Ok("stopped".into())
     }
@@ -219,8 +237,8 @@ impl DaemonState {
             "status" => {
                 let status = if self.recording { "recording" } else { "idle" };
                 ipc::Response::ok(format!(
-                    "{} (mode: {}, lang: {}, model: {})",
-                    status, self.state.mode, self.state.lang, self.state.model
+                    "{} (mode: {}, output: {}, lang: {}, model: {})",
+                    status, self.state.mode, self.state.output, self.state.lang, self.state.model
                 ))
             }
             "mode" => {
@@ -246,6 +264,22 @@ impl DaemonState {
                     ipc::Response::ok(format!("language: {}", l))
                 } else {
                     ipc::Response::ok(format!("language: {}", self.state.lang))
+                }
+            }
+            "output" => {
+                if let Some(o) = req.arg {
+                    if ["type", "clipboard"].contains(&o.as_str()) {
+                        let _ = fs::write(&self.config.output_file, &o);
+                        self.state.output = o.clone();
+                        ipc::Response::ok(format!("output: {}", o))
+                    } else {
+                        ipc::Response::err(format!("invalid output '{}'. use: type, clipboard", o))
+                    }
+                } else {
+                    ipc::Response::ok(format!(
+                        "output: {} (available: type, clipboard)",
+                        self.state.output
+                    ))
                 }
             }
             other => ipc::Response::err(format!("unknown command: {}", other)),
