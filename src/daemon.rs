@@ -412,6 +412,12 @@ impl DaemonState {
                     if model.is_empty() {
                         return ipc::Response::err("model name required after provider/");
                     }
+                    if !config::provider_models(provider).contains(&model) {
+                        let available = config::provider_models(provider).join(", ");
+                        return ipc::Response::err(format!(
+                            "unknown model '{model}' for {provider}. available: {available}"
+                        ));
+                    }
                     let caps = config::model_caps(provider, model);
                     let mut warnings = Vec::new();
                     if self.state.mode == "live" && !caps.live {
