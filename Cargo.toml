@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.4", features = ["derive"] }
+clap_complete = "4.4"
 tokio = { version = "1", features = ["full", "signal"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures = "0.3"

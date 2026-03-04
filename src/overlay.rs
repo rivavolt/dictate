@@ -18,7 +18,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_surface},
+    protocol::{wl_output, wl_region, wl_surface},
     Connection, Proxy, QueueHandle,
 };
 
@@ -110,9 +110,14 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
     );
 
     layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_size(1, 1);
+    layer.set_size(0, PILL_SIZE);
     layer.set_exclusive_zone(0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+
+    // Empty input region: all pointer events pass through to surfaces below
+    let region = compositor.wl_compositor().create_region(&qh, ());
+    layer.wl_surface().set_input_region(Some(&region));
+
     layer.commit();
 
     // EGL setup
@@ -194,7 +199,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         configured: false,
         screen_width: 0,
         width: 0,
-        height: 1,
+        height: PILL_SIZE,
         max_height: 400,
         font_size: 16.0,
         line_height: 24.0,
@@ -568,11 +573,7 @@ impl State {
         if self.fade_alpha <= 0.01 && self.fade_target <= 0.0 {
             self.canvas.flush();
             self.egl_lib.swap_buffers(self.egl_display, self.egl_surface).ok();
-            if self.visible {
-                self.visible = false;
-                self.height = 1;
-                self.layer.set_size(1, 1);
-            }
+            self.visible = false;
             return;
         }
 
@@ -843,6 +844,13 @@ delegate_output!(State);
 delegate_shm!(State);
 delegate_layer!(State);
 delegate_registry!(State);
+
+impl wayland_client::Dispatch<wl_region::WlRegion, ()> for State {
+    fn event(
+        _: &mut Self, _: &wl_region::WlRegion, _: wl_region::Event,
+        _: &(), _: &Connection, _: &QueueHandle<Self>,
+    ) {}
+}
 
 impl ProvidesRegistryState for State {
     fn registry(&mut self) -> &mut RegistryState {

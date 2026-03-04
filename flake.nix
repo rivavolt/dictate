@@ -76,8 +76,14 @@
         default = let
           unwrapped = craneLib.buildPackage {
             src = craneLib.cleanCargoSource ./.;
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [ pkgs.pkg-config pkgs.installShellFiles ];
             buildInputs = [ pkgs.alsa-lib pkgs.openssl pkgs.libxkbcommon pkgs.wayland ];
+            postInstall = ''
+              installShellCompletion --cmd dictate \
+                --zsh <($out/bin/dictate completions zsh) \
+                --bash <($out/bin/dictate completions bash) \
+                --fish <($out/bin/dictate completions fish)
+            '';
             meta = {
               description = "Voice-to-text dictation daemon";
               mainProgram = "dictate";

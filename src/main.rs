@@ -13,7 +13,8 @@ mod transcript;
 mod tray;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(name = "dictate", about = "Voice-to-text dictation daemon")]
@@ -44,6 +45,8 @@ enum Commands {
     Font { font: Option<String> },
     /// Set or show model (provider/model). Providers: deepgram, groq, fireworks
     Model { model: Option<String> },
+    /// Generate shell completions
+    Completions { shell: Shell },
 }
 
 #[tokio::main]
@@ -51,6 +54,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command.unwrap_or(Commands::Toggle) {
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "dictate", &mut std::io::stdout());
+            Ok(())
+        }
         Commands::Daemon => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -99,7 +106,7 @@ async fn main() -> Result<()> {
                     command: "model".into(),
                     arg: model,
                 },
-                Commands::Daemon => unreachable!(),
+                Commands::Daemon | Commands::Completions { .. } => unreachable!(),
             };
 
             let resp = ipc::send(&config.socket_path, &req).await?;
