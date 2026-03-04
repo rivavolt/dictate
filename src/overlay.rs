@@ -48,11 +48,6 @@ pub struct Handle {
 }
 
 impl Handle {
-    pub fn dummy() -> Self {
-        let (tx, _rx) = calloop::channel::channel::<Command>();
-        Self { tx }
-    }
-
     pub fn show(&self) {
         let _ = self.tx.send(Command::Show);
     }
