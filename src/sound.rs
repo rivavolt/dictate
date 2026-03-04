@@ -56,6 +56,7 @@ fn play_wav(data: &[u8]) {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(data);
     }
+    std::thread::spawn(move || { let _ = child.wait(); });
 }
 
 pub fn play_start() {
