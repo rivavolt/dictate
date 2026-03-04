@@ -611,7 +611,7 @@ impl State {
             self.canvas.fill_path(&bg_path, &bg_paint);
 
             // Border
-            let mut border_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, 0.08 * self.fade_alpha));
+            let mut border_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, 0.25 * self.fade_alpha));
             border_paint.set_line_width(sf);
             self.canvas.stroke_path(&bg_path, &border_paint);
         }
