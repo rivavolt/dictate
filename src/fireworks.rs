@@ -9,8 +9,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config;
-use crate::output;
-use crate::overlay;
+use crate::transcript::TranscriptEvent;
 
 #[derive(Deserialize)]
 struct StreamResponse {
@@ -30,7 +29,7 @@ pub async fn stream_live(
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     _sample_rate: u32,
-    overlay: overlay::Handle,
+    tx: mpsc::UnboundedSender<TranscriptEvent>,
 ) -> Result<()> {
     let api_key = config::get_api_key("fireworks")?;
     let (_, model) = config::parse_provider_model(&state.model);
@@ -80,16 +79,23 @@ pub async fn stream_live(
             .await;
     });
 
-    let cfg = config::Config::new();
-    let transcript_file = cfg.transcript_file.clone();
-    let output_mode = state.output.clone();
-    let overlay_handle = overlay.clone();
-
+    let stop_recv = stop.clone();
     let receiver_task = tokio::spawn(async move {
         let mut prev_final_text = String::new();
         let mut last_pending = String::new();
 
-        while let Some(Ok(msg)) = ws_rx.next().await {
+        loop {
+            let msg = if stop_recv.load(Ordering::Relaxed) {
+                match tokio::time::timeout(Duration::from_millis(200), ws_rx.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    _ => break,
+                }
+            } else {
+                match ws_rx.next().await {
+                    Some(Ok(msg)) => msg,
+                    _ => break,
+                }
+            };
             let Message::Text(text) = msg else {
                 continue;
             };
@@ -109,7 +115,6 @@ pub async fn stream_live(
                 continue;
             };
 
-            // Split words into final (confirmed) and pending (still changing)
             let mut final_words = String::new();
             let mut pending_words = String::new();
             for w in &words {
@@ -126,52 +131,38 @@ pub async fn stream_live(
                 }
             }
 
-            // On final checkpoint, treat remaining pending words as confirmed
             if is_final_checkpoint && !pending_words.is_empty() {
                 if !final_words.is_empty() { final_words.push(' '); }
                 final_words.push_str(&pending_words);
                 pending_words.clear();
             }
 
-            // When final text grows, emit the new portion
             if final_words.len() > prev_final_text.len() {
                 let new_text = final_words[prev_final_text.len()..].trim();
                 if !new_text.is_empty() {
-                    tracing::info!("transcript: {new_text}");
-                    if output_mode == "clipboard" {
-                        output::copy_to_clipboard(&final_words);
-                        overlay_handle.set_text(final_words.clone());
-                    } else {
-                        output::type_text(new_text);
-                        output::copy_to_clipboard(&final_words);
-                    }
-                    let _ = std::fs::write(&transcript_file, &final_words);
+                    let _ = tx.send(TranscriptEvent::Final {
+                        delta: new_text.to_string(),
+                        accumulated: final_words.clone(),
+                    });
                 }
                 prev_final_text = final_words;
             }
 
-            // Show pending words as interim
-            if !pending_words.is_empty() && output_mode == "clipboard" {
-                overlay_handle.set_pending(pending_words.clone());
+            if !pending_words.is_empty() {
+                let _ = tx.send(TranscriptEvent::Interim(pending_words.clone()));
             }
             last_pending = pending_words;
 
             if is_final_checkpoint { break; }
         }
 
-        // Flush any pending words that were never finalized
         if !last_pending.is_empty() {
             if !prev_final_text.is_empty() { prev_final_text.push(' '); }
             prev_final_text.push_str(&last_pending);
-            tracing::info!("transcript (flushed): {last_pending}");
-            if output_mode == "clipboard" {
-                output::copy_to_clipboard(&prev_final_text);
-                overlay_handle.set_text(prev_final_text.clone());
-            } else {
-                output::type_text(&last_pending);
-                output::copy_to_clipboard(&prev_final_text);
-            }
-            let _ = std::fs::write(&transcript_file, &prev_final_text);
+            let _ = tx.send(TranscriptEvent::Final {
+                delta: last_pending,
+                accumulated: prev_final_text,
+            });
         }
     });
 
@@ -179,11 +170,18 @@ pub async fn stream_live(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+    let sender_abort = sender_task.abort_handle();
+    let receiver_abort = receiver_task.abort_handle();
+    if tokio::time::timeout(Duration::from_secs(3), async {
         let _ = sender_task.await;
         let _ = receiver_task.await;
     })
-    .await;
+    .await
+    .is_err()
+    {
+        sender_abort.abort();
+        receiver_abort.abort();
+    }
 
     Ok(())
 }

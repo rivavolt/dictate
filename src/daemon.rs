@@ -14,6 +14,7 @@ use crate::ipc;
 use crate::output;
 use crate::overlay;
 use crate::sound;
+use crate::transcript::TranscriptEvent;
 use crate::tray;
 
 struct DaemonState {
@@ -88,21 +89,54 @@ impl DaemonState {
         let (stream, audio_rx, sample_rate) = audio::capture_to_channel(stop.clone())?;
         self._audio_stream = Some(stream);
 
+        let (tx, mut rx) = mpsc::unbounded_channel::<TranscriptEvent>();
+
+        let output_mode = self.state.output.clone();
+        let transcript_file = self.config.transcript_file.clone();
+        let overlay_handle = self.overlay.clone();
         let state = self.state.clone();
-        let overlay = self.overlay.clone();
         let provider = provider.to_string();
         self.record_handle = Some(tokio::spawn(async move {
+            let is_clipboard = output_mode == "clipboard";
+            let event_handler = tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        TranscriptEvent::Final { delta, accumulated } => {
+                            tracing::info!("transcript: {delta}");
+                            if is_clipboard {
+                                output::copy_to_clipboard(&accumulated);
+                                overlay_handle.set_text(accumulated.clone());
+                            } else {
+                                output::type_text(&delta);
+                                output::copy_to_clipboard(&accumulated);
+                            }
+                            let _ = std::fs::write(&transcript_file, &accumulated);
+                        }
+                        TranscriptEvent::Interim(text) => {
+                            if is_clipboard {
+                                overlay_handle.set_pending(text);
+                            }
+                        }
+                    }
+                }
+                if is_clipboard {
+                    overlay_handle.copied();
+                }
+            });
+
             let result = match provider.as_str() {
                 "fireworks" => {
-                    fireworks::stream_live(&state, audio_rx, stop, sample_rate, overlay).await
+                    fireworks::stream_live(&state, audio_rx, stop, sample_rate, tx).await
                 }
                 _ => {
-                    deepgram::stream_live(&state, audio_rx, stop, sample_rate, overlay).await
+                    deepgram::stream_live(&state, audio_rx, stop, sample_rate, tx).await
                 }
             };
             if let Err(e) = result {
                 tracing::error!("live streaming error: {e}");
             }
+            // tx dropped here — wait for event handler to drain remaining events
+            let _ = event_handler.await;
         }));
 
         Ok(())
@@ -234,18 +268,9 @@ impl DaemonState {
         }
         self._audio_stream = None;
 
-        if self.state.output == "clipboard" {
-            self.overlay.processing();
-        }
-
         if let Some(handle) = self.record_handle.take() {
-            let overlay = self.overlay.clone();
-            let is_clipboard = self.state.output == "clipboard";
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), handle).await;
-                if is_clipboard {
-                    overlay.copied();
-                }
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(6), handle).await;
             });
         }
 

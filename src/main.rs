@@ -9,6 +9,7 @@ mod ipc;
 mod output;
 mod overlay;
 mod sound;
+mod transcript;
 mod tray;
 
 use anyhow::Result;

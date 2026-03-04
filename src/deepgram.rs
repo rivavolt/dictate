@@ -8,8 +8,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config;
-use crate::output;
-use crate::overlay;
+use crate::transcript::TranscriptEvent;
 
 #[derive(Serialize, Deserialize)]
 struct LiveResponse {
@@ -34,7 +33,7 @@ pub async fn stream_live(
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     sample_rate: u32,
-    overlay: overlay::Handle,
+    tx: mpsc::UnboundedSender<TranscriptEvent>,
 ) -> Result<()> {
     let api_key = config::get_api_key("deepgram")?;
     let (_, model) = config::parse_provider_model(&state.model);
@@ -82,14 +81,23 @@ pub async fn stream_live(
             .await;
     });
 
-    let cfg = config::Config::new();
-    let transcript_file = cfg.transcript_file.clone();
     let mut full_transcript = String::new();
-    let output_mode = state.output.clone();
-    let overlay_handle = overlay.clone();
+    let stop_recv = stop.clone();
 
     let receiver_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_rx.next().await {
+        loop {
+            let msg = if stop_recv.load(Ordering::Relaxed) {
+                match tokio::time::timeout(Duration::from_millis(200), ws_rx.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    _ => break,
+                }
+            } else {
+                match ws_rx.next().await {
+                    Some(Ok(msg)) => msg,
+                    _ => break,
+                }
+            };
+
             let Message::Text(text) = msg else {
                 continue;
             };
@@ -110,21 +118,16 @@ pub async fn stream_live(
             }
 
             if resp.is_final.unwrap_or(false) {
-                tracing::info!("transcript: {}", alt.transcript);
                 full_transcript.push_str(&alt.transcript);
                 if !full_transcript.ends_with(' ') {
                     full_transcript.push(' ');
                 }
-                if output_mode == "clipboard" {
-                    output::copy_to_clipboard(&full_transcript);
-                    overlay_handle.set_text(full_transcript.clone());
-                } else {
-                    output::type_text(&alt.transcript);
-                    output::copy_to_clipboard(&full_transcript);
-                }
-                let _ = std::fs::write(&transcript_file, &full_transcript);
-            } else if output_mode == "clipboard" {
-                overlay_handle.set_pending(alt.transcript.clone());
+                let _ = tx.send(TranscriptEvent::Final {
+                    delta: alt.transcript,
+                    accumulated: full_transcript.clone(),
+                });
+            } else {
+                let _ = tx.send(TranscriptEvent::Interim(alt.transcript));
             }
         }
     });
@@ -134,11 +137,18 @@ pub async fn stream_live(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+    let sender_abort = sender_task.abort_handle();
+    let receiver_abort = receiver_task.abort_handle();
+    if tokio::time::timeout(Duration::from_secs(3), async {
         let _ = sender_task.await;
         let _ = receiver_task.await;
     })
-    .await;
+    .await
+    .is_err()
+    {
+        sender_abort.abort();
+        receiver_abort.abort();
+    }
 
     Ok(())
 }

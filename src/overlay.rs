@@ -28,13 +28,13 @@ const OVERLAY_WIDTH_FRAC: f64 = 0.618;
 const CHAR_WIDTH_RATIO: f32 = 0.47;
 const CORNER_RADIUS: f32 = 12.0;
 const FADE_DURATION_MS: f32 = 150.0;
+const SHRINK_DURATION_MS: f32 = 150.0;
 const DOT_RADIUS: f32 = 4.0;
 
 pub enum Command {
     Show,
     SetText(String),
     SetPending(String),
-    Processing,
     Copied,
 }
 
@@ -54,10 +54,6 @@ impl Handle {
 
     pub fn set_pending(&self, text: String) {
         let _ = self.tx.send(Command::SetPending(text));
-    }
-
-    pub fn processing(&self) {
-        let _ = self.tx.send(Command::Processing);
     }
 
     pub fn copied(&self) {
@@ -133,12 +129,15 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         font_system,
         swash_cache,
         text_buffer,
+        pixmap: None,
+        pixmap_w: 0,
+        pixmap_h: 0,
         font_name: font_name.to_string(),
         text: String::new(),
         pending: String::new(),
         listening: false,
-        processing: false,
-        copied_countdown: 0.0,
+        shrink_t: 0.0,
+        pill_countdown: 0.0,
         anim_phase: 0.0,
         fade_alpha: 0.0,
         fade_target: 0.0,
@@ -181,18 +180,27 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                 needs_redraw = true;
             }
 
-            // Copied countdown → trigger fade
-            if state.copied_countdown > 0.0 {
-                state.copied_countdown -= state.frame_ms as f32 / 1000.0;
-                if state.copied_countdown <= 0.0 {
-                    state.copied_countdown = 0.0;
+            // Shrink-to-pill animation
+            if state.shrink_t > 0.0 && state.shrink_t < 1.0 {
+                state.shrink_t = (state.shrink_t + state.frame_ms as f32 / SHRINK_DURATION_MS).min(1.0);
+                if state.shrink_t >= 1.0 {
+                    state.pill_countdown = 0.6;
+                }
+                needs_redraw = true;
+            }
+
+            // "Copied" pill hold → fade
+            if state.pill_countdown > 0.0 {
+                state.pill_countdown -= state.frame_ms as f32 / 1000.0;
+                if state.pill_countdown <= 0.0 {
+                    state.pill_countdown = 0.0;
                     state.fade_target = 0.0;
                 }
                 needs_redraw = true;
             }
 
-            // Pulse/spin animation for listening dot, processing spinner, pending text
-            if state.visible && (state.listening || state.processing || !state.pending.is_empty()) {
+            // Pulse animation for listening dot, pending text
+            if state.visible && (state.listening || !state.pending.is_empty()) {
                 state.anim_phase += std::f32::consts::TAU * state.frame_ms as f32 / 1500.0;
                 needs_redraw = true;
             }
@@ -210,18 +218,19 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                 Command::Show => {
                     state.visible = true;
                     state.listening = true;
-                    state.processing = false;
-                    state.copied_countdown = 0.0;
+                    state.shrink_t = 0.0;
+                    state.pill_countdown = 0.0;
                     state.text.clear();
                     state.pending.clear();
+                    state.fade_alpha = 1.0;
                     state.fade_target = 1.0;
                     state.resize_and_redraw();
                 }
                 Command::SetText(text) => {
                     state.listening = false;
-                    state.processing = false;
                     state.text = text;
                     state.pending.clear();
+
                     if state.visible {
                         state.resize_and_redraw();
                     }
@@ -229,26 +238,18 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                 Command::SetPending(text) => {
                     state.listening = false;
                     state.pending = text;
-                    if state.visible {
-                        state.resize_and_redraw();
-                    }
-                }
-                Command::Processing => {
-                    state.listening = false;
-                    state.processing = true;
-                    state.copied_countdown = 0.0;
+
                     if state.visible {
                         state.resize_and_redraw();
                     }
                 }
                 Command::Copied => {
-                    state.processing = false;
                     state.listening = false;
                     if state.text.is_empty() {
                         state.fade_target = 0.0;
                     } else {
-                        state.copied_countdown = 1.5;
-                        state.resize_and_redraw();
+                        state.shrink_t = 0.01;
+                        state.redraw();
                     }
                 }
             }
@@ -271,12 +272,15 @@ struct State {
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_buffer: Buffer,
+    pixmap: Option<tiny_skia::Pixmap>,
+    pixmap_w: u32,
+    pixmap_h: u32,
     font_name: String,
     text: String,
     pending: String,
     listening: bool,
-    processing: bool,
-    copied_countdown: f32,
+    shrink_t: f32,
+    pill_countdown: f32,
     anim_phase: f32,
     fade_alpha: f32,
     fade_target: f32,
@@ -306,9 +310,6 @@ impl State {
 
     fn display_text(&self) -> String {
         if self.listening {
-            return String::new();
-        }
-        if self.processing && self.text.is_empty() && self.pending.is_empty() {
             return String::new();
         }
         let mut full = self.text.clone();
@@ -405,21 +406,74 @@ impl State {
             .create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888)
             .expect("create buffer");
 
-        let mut pixmap = tiny_skia::Pixmap::new(pw, ph).expect("pixmap");
+        // Reuse pixmap if same size, otherwise allocate
+        if self.pixmap_w != pw || self.pixmap_h != ph {
+            self.pixmap = Some(tiny_skia::Pixmap::new(pw, ph).expect("pixmap"));
+            self.pixmap_w = pw;
+            self.pixmap_h = ph;
+        }
+        let pixmap = self.pixmap.as_mut().unwrap();
+        pixmap.data_mut().fill(0);
 
-        // Background with rounded corners and fade alpha
+        // Background rect — shrinks to a circle during copied animation
+        let ease_t = if self.shrink_t > 0.0 {
+            let t = self.shrink_t.min(1.0);
+            1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t) // cubic ease-out
+        } else {
+            0.0
+        };
+
         let bg_alpha = (0xB0 as f32 * self.fade_alpha) as u8;
-        let r = CORNER_RADIUS * sf;
+        let target_h = MIN_HEIGHT as f32 * sf;
+        // Measure "Copied" text width via layout
+        let target_w = {
+            let font_family = Family::Name(&self.font_name);
+            self.text_buffer.set_metrics(
+                &mut self.font_system,
+                Metrics::new(self.font_size * sf, self.line_height * sf),
+            );
+            self.text_buffer.set_text(
+                &mut self.font_system,
+                "Copied",
+                &Attrs::new().family(font_family),
+                Shaping::Advanced,
+            );
+            self.text_buffer.set_size(&mut self.font_system, None, None);
+            self.text_buffer.shape_until_scroll(&mut self.font_system, false);
+            let w = self.text_buffer.layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0f32, f32::max);
+            w + PADDING_X as f32 * sf * 2.0
+        }.max(target_h);
+
+        let (rx, ry, rw, rh) = if ease_t > 0.0 {
+            let rw = pw as f32 + (target_w - pw as f32) * ease_t;
+            let rh = ph as f32 + (target_h - ph as f32) * ease_t;
+            let rx = (pw as f32 - rw) / 2.0;
+            let ry = ph as f32 - rh;
+            (rx, ry, rw, rh)
+        } else {
+            (0.0, 0.0, pw as f32, ph as f32)
+        };
+
+        let r_top = if ease_t > 0.0 {
+            CORNER_RADIUS * sf + (rh / 2.0 - CORNER_RADIUS * sf) * ease_t
+        } else {
+            CORNER_RADIUS * sf
+        };
+        let r_bot = rh / 2.0 * ease_t; // 0 at start, fully rounded at end
+
         let rrect = {
             let mut pb = tiny_skia::PathBuilder::new();
-            // Top-left
-            pb.move_to(r, 0.0);
-            pb.line_to(pw as f32 - r, 0.0);
-            pb.quad_to(pw as f32, 0.0, pw as f32, r);
-            pb.line_to(pw as f32, ph as f32);
-            pb.line_to(0.0, ph as f32);
-            pb.line_to(0.0, r);
-            pb.quad_to(0.0, 0.0, r, 0.0);
+            pb.move_to(rx + r_top, ry);
+            pb.line_to(rx + rw - r_top, ry);
+            pb.quad_to(rx + rw, ry, rx + rw, ry + r_top);
+            pb.line_to(rx + rw, ry + rh - r_bot);
+            pb.quad_to(rx + rw, ry + rh, rx + rw - r_bot, ry + rh);
+            pb.line_to(rx + r_bot, ry + rh);
+            pb.quad_to(rx, ry + rh, rx, ry + rh - r_bot);
+            pb.line_to(rx, ry + r_top);
+            pb.quad_to(rx, ry, rx + r_top, ry);
             pb.close();
             pb.finish().unwrap()
         };
@@ -428,7 +482,6 @@ impl State {
         paint.anti_alias = true;
         pixmap.fill_path(&rrect, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
 
-        // Subtle top border
         let mut border_paint = tiny_skia::Paint::default();
         border_paint.set_color(tiny_skia::Color::from_rgba8(0xFF, 0xFF, 0xFF, (0x15 as f32 * self.fade_alpha) as u8));
         border_paint.anti_alias = true;
@@ -436,53 +489,91 @@ impl State {
         stroke.width = sf;
         pixmap.stroke_path(&rrect, &border_paint, &stroke, tiny_skia::Transform::identity(), None);
 
-        let text_alpha = (0xFF as f32 * self.fade_alpha) as u8;
+        // Text fades out in the first 25% of shrink
+        let text_opacity = if ease_t > 0.0 { (1.0 - ease_t * 4.0).max(0.0) } else { 1.0 };
+        let text_alpha = (0xFF as f32 * self.fade_alpha * text_opacity) as u8;
 
-        let compact_pill = self.listening
-            || (self.processing && self.text.is_empty() && self.pending.is_empty());
+        let compact_pill = self.listening;
 
-        if compact_pill {
+        let copied_pill = self.shrink_t >= 1.0 && self.pill_countdown > 0.0;
+
+        if copied_pill {
+            // "Copied" pill at center
+            let pill_alpha = (0xFF as f32 * self.fade_alpha) as u8;
+            let font_family = Family::Name(&self.font_name);
+            self.text_buffer.set_metrics(
+                &mut self.font_system,
+                Metrics::new(self.font_size * sf, self.line_height * sf),
+            );
+            self.text_buffer.set_text(
+                &mut self.font_system,
+                "Copied",
+                &Attrs::new().family(font_family),
+                Shaping::Advanced,
+            );
+            self.text_buffer.set_size(
+                &mut self.font_system,
+                Some(rw - PADDING_X as f32 * sf * 2.0),
+                None,
+            );
+            self.text_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+
+            let cw = pw as i32;
+            let ch = ph as i32;
+            let text_x = rx as i32 + (PADDING_X as f32 * sf) as i32;
+            let text_y = ry as i32 + ((rh - self.line_height * sf) / 2.0) as i32;
+            let pixels = pixmap.pixels_mut();
+
+            self.text_buffer.draw(
+                &mut self.font_system,
+                &mut self.swash_cache,
+                Color::rgba(0xCC, 0xCC, 0xCC, pill_alpha),
+                |x, y, w, h, color| {
+                    let x = x + text_x;
+                    let y = y + text_y;
+                    let a = color.a();
+                    if a == 0 { return; }
+                    let a32 = a as u32;
+                    let src = tiny_skia::PremultipliedColorU8::from_rgba(
+                        ((color.r() as u32 * a32) / 255) as u8,
+                        ((color.g() as u32 * a32) / 255) as u8,
+                        ((color.b() as u32 * a32) / 255) as u8,
+                        a,
+                    ).unwrap();
+                    for row in y..(y + h as i32).min(ch) {
+                        if row < 0 { continue; }
+                        for col in x..(x + w as i32).min(cw) {
+                            if col < 0 { continue; }
+                            let idx = (row * cw + col) as usize;
+                            if idx < pixels.len() {
+                                pixels[idx] = blend_over(pixels[idx], src);
+                            }
+                        }
+                    }
+                },
+            );
+        } else if text_alpha == 0 {
+            // Shrink animation in progress — no text to render
+        } else if compact_pill {
             let dot_r = DOT_RADIUS * sf;
             let ind_x = PADDING_X as f32 * sf + dot_r;
             let ind_y = ph as f32 / 2.0;
 
-            if self.listening {
-                // Pulsing red dot
-                let pulse = (self.anim_phase.sin() * 0.5 + 0.5) * 0.4 + 0.6;
-                let dot_alpha = (pulse * text_alpha as f32) as u8;
-                let dot_path = {
-                    let mut pb = tiny_skia::PathBuilder::new();
-                    pb.push_circle(ind_x, ind_y, dot_r);
-                    pb.finish().unwrap()
-                };
-                let mut dot_paint = tiny_skia::Paint::default();
-                dot_paint.set_color(tiny_skia::Color::from_rgba8(0xE0, 0x40, 0x40, dot_alpha));
-                dot_paint.anti_alias = true;
-                pixmap.fill_path(&dot_path, &dot_paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
-            } else {
-                // Spinning arc for processing
-                let segments = 24;
-                let sweep = std::f32::consts::TAU * 0.75;
-                let arc_path = {
-                    let mut pb = tiny_skia::PathBuilder::new();
-                    for i in 0..=segments {
-                        let angle = self.anim_phase + sweep * i as f32 / segments as f32;
-                        let px = ind_x + dot_r * angle.cos();
-                        let py = ind_y + dot_r * angle.sin();
-                        if i == 0 { pb.move_to(px, py); } else { pb.line_to(px, py); }
-                    }
-                    pb.finish().unwrap()
-                };
-                let mut arc_paint = tiny_skia::Paint::default();
-                arc_paint.set_color(tiny_skia::Color::from_rgba8(0x88, 0x88, 0xCC, text_alpha));
-                arc_paint.anti_alias = true;
-                let mut arc_stroke = tiny_skia::Stroke::default();
-                arc_stroke.width = 1.5 * sf;
-                arc_stroke.line_cap = tiny_skia::LineCap::Round;
-                pixmap.stroke_path(&arc_path, &arc_paint, &arc_stroke, tiny_skia::Transform::identity(), None);
-            }
+            // Pulsing red dot
+            let pulse = (self.anim_phase.sin() * 0.5 + 0.5) * 0.4 + 0.6;
+            let dot_alpha = (pulse * text_alpha as f32) as u8;
+            let dot_path = {
+                let mut pb = tiny_skia::PathBuilder::new();
+                pb.push_circle(ind_x, ind_y, dot_r);
+                pb.finish().unwrap()
+            };
+            let mut dot_paint = tiny_skia::Paint::default();
+            dot_paint.set_color(tiny_skia::Color::from_rgba8(0xE0, 0x40, 0x40, dot_alpha));
+            dot_paint.anti_alias = true;
+            pixmap.fill_path(&dot_path, &dot_paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
 
-            let label = if self.listening { "Listening..." } else { "Processing..." };
+            let label = "Listening...";
             let font_family = Family::Name(&self.font_name);
             self.text_buffer.set_metrics(
                 &mut self.font_system,
