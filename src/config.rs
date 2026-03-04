@@ -73,6 +73,41 @@ pub fn resolve_model(current: &str, mode: &str, lang: &str) -> Option<String> {
     Some("deepgram/nova-3".to_string())
 }
 
+pub const LANGUAGES: &[(&str, &str)] = &[
+    ("auto", "Auto-detect"),
+    ("en", "English"),
+    ("zh", "Chinese"),
+    ("es", "Spanish"),
+    ("hi", "Hindi"),
+    ("pt", "Portuguese"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("it", "Italian"),
+    ("nl", "Dutch"),
+    ("pl", "Polish"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("sv", "Swedish"),
+    ("tr", "Turkish"),
+    ("uk", "Ukrainian"),
+    ("ar", "Arabic"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("el", "Greek"),
+    ("fi", "Finnish"),
+    ("hu", "Hungarian"),
+    ("id", "Indonesian"),
+    ("no", "Norwegian"),
+    ("th", "Thai"),
+    ("vi", "Vietnamese"),
+];
+
+pub fn lang_name(code: &str) -> Option<&'static str> {
+    LANGUAGES.iter().find(|(c, _)| *c == code).map(|(_, name)| *name)
+}
+
 pub fn provider_models(provider: &str) -> &'static [&'static str] {
     match provider {
         "deepgram" => &["nova-3", "nova-2", "nova-2-general", "whisper-large", "whisper-medium", "whisper-small", "whisper-tiny"],

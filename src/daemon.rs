@@ -371,7 +371,8 @@ impl DaemonState {
                     let lang = if l == "multi" { config::AUTO_LANG.to_string() } else { l };
                     let _ = fs::write(&self.config.lang_file, &lang);
                     self.state.lang = lang.clone();
-                    let mut msg = format!("language: {lang}");
+                    let label = config::lang_name(&lang).unwrap_or(&lang);
+                    let mut msg = format!("language: {label} ({lang})");
                     if let Some(new_model) = config::resolve_model(&self.state.model, &self.state.mode, &self.state.lang) {
                         self.state.model = new_model.clone();
                         let _ = fs::write(&self.config.model_file, &self.state.model);
@@ -379,7 +380,18 @@ impl DaemonState {
                     }
                     ipc::Response::ok(msg)
                 } else {
-                    ipc::Response::ok(format!("language: {}", self.state.lang))
+                    let current = match config::lang_name(&self.state.lang) {
+                        Some(name) => format!("{name} ({})", self.state.lang),
+                        None => self.state.lang.clone(),
+                    };
+                    let list = config::LANGUAGES.iter()
+                        .map(|(code, name)| {
+                            let marker = if *code == self.state.lang { " *" } else { "" };
+                            format!("  {name} ({code}){marker}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ipc::Response::ok(format!("language: {current}\navailable:\n{list}"))
                 }
             }
             "font" => {
