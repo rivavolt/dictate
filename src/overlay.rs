@@ -22,7 +22,7 @@ use wayland_client::{
     Connection, Proxy, QueueHandle,
 };
 
-const MIN_HEIGHT: u32 = 36;
+const PILL_SIZE: u32 = 44;
 const PADDING_X: f32 = 16.0;
 const PADDING_Y: f32 = 8.0;
 const OVERLAY_WIDTH_FRAC: f64 = 0.618;
@@ -31,7 +31,6 @@ const CORNER_RADIUS: f32 = 12.0;
 const FADE_DURATION_MS: f32 = 150.0;
 const SHRINK_DURATION_MS: f32 = 150.0;
 const WIDTH_ANIM_MS: f32 = 100.0;
-const DOT_RADIUS: f32 = 4.0;
 const SHADOW_FEATHER: f32 = 20.0;
 const SHADOW_OFFSET_Y: f32 = 4.0;
 
@@ -106,7 +105,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
     );
 
     layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_size(0, MIN_HEIGHT);
+    layer.set_size(0, PILL_SIZE);
     layer.set_exclusive_zone(0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.commit();
@@ -140,8 +139,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
 
     let wl_egl_surface = wayland_egl::WlEglSurface::new(
         layer.wl_surface().id(),
-        MIN_HEIGHT as i32,
-        MIN_HEIGHT as i32,
+        PILL_SIZE as i32,
+        PILL_SIZE as i32,
     )?;
 
     let egl_surface = unsafe {
@@ -188,7 +187,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         configured: false,
         screen_width: 0,
         width: 0,
-        height: MIN_HEIGHT,
+        height: PILL_SIZE,
         max_height: 400,
         font_size: 16.0,
         line_height: 24.0,
@@ -256,8 +255,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                 state.render_w = state.content_pw;
             }
 
-            // Pulse animation for listening dot, pending text
-            if state.visible && (state.listening || !state.pending.is_empty()) {
+            // Pulse animation for listening dot
+            if state.visible && state.listening {
                 state.anim_phase += std::f32::consts::TAU * state.frame_ms as f32 / 1500.0;
                 needs_redraw = true;
             }
@@ -282,7 +281,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     state.pending.clear();
                     state.fade_alpha = 1.0;
                     state.fade_target = 1.0;
-                    let pill_w = MIN_HEIGHT as f32 * state.scale as f32;
+                    let pill_w = PILL_SIZE as f32 * state.scale as f32;
                     state.content_pw = pill_w;
                     state.render_w = pill_w;
                     state.resize_and_redraw();
@@ -420,9 +419,48 @@ impl State {
         lines
     }
 
+    fn draw_mic_icon(&mut self, cx: f32, cy: f32, size: f32, color: Color) {
+        let s = size / 12.0;
+        let lw = 1.5 * s;
+        let mut paint = Paint::color(color);
+        paint.set_line_width(lw);
+        paint.set_line_cap(femtovg::LineCap::Round);
+
+        // Mic body capsule
+        let mut body = Path::new();
+        body.rounded_rect(cx - 3.0 * s, cy - 6.0 * s, 6.0 * s, 10.0 * s, 3.0 * s);
+        self.canvas.stroke_path(&body, &paint);
+
+        // U-shape stand
+        let mut stand = Path::new();
+        stand.move_to(cx - 7.0 * s, cy - 1.0 * s);
+        stand.bezier_to(cx - 7.0 * s, cy + 6.5 * s, cx - 3.5 * s, cy + 9.0 * s, cx, cy + 9.0 * s);
+        stand.bezier_to(cx + 3.5 * s, cy + 9.0 * s, cx + 7.0 * s, cy + 6.5 * s, cx + 7.0 * s, cy - 1.0 * s);
+        self.canvas.stroke_path(&stand, &paint);
+
+        // Stem
+        let mut stem = Path::new();
+        stem.move_to(cx, cy + 9.0 * s);
+        stem.line_to(cx, cy + 12.0 * s);
+        self.canvas.stroke_path(&stem, &paint);
+    }
+
+    fn draw_check_icon(&mut self, cx: f32, cy: f32, size: f32, color: Color) {
+        let s = size / 12.0;
+        let mut check = Path::new();
+        check.move_to(cx - 8.0 * s, cy);
+        check.line_to(cx - 3.0 * s, cy + 5.5 * s);
+        check.line_to(cx + 8.0 * s, cy - 6.0 * s);
+        let mut paint = Paint::color(color);
+        paint.set_line_width(2.0 * s);
+        paint.set_line_cap(femtovg::LineCap::Round);
+        paint.set_line_join(femtovg::LineJoin::Round);
+        self.canvas.stroke_path(&check, &paint);
+    }
+
     fn compute_height(&mut self) -> u32 {
         if self.listening {
-            return MIN_HEIGHT;
+            return PILL_SIZE;
         }
         let sf = self.scale as f32;
         let pw = (self.width * self.scale as u32) as f32;
@@ -441,12 +479,12 @@ impl State {
                 .map(|l| self.measure_text_width(l, font_sz))
                 .fold(0.0f32, f32::max);
             (widest + PADDING_X * sf * 2.0)
-                .max(MIN_HEIGHT as f32 * sf)
+                .max(PILL_SIZE as f32 * sf)
                 .min(pw)
         };
 
         let h = PADDING_Y as u32 * 2 + num_lines * self.line_height as u32;
-        h.max(MIN_HEIGHT).min(self.max_height)
+        h.max(PILL_SIZE).min(self.max_height)
     }
 
     fn resize_and_redraw(&mut self) {
@@ -482,8 +520,8 @@ impl State {
             self.egl_lib.swap_buffers(self.egl_display, self.egl_surface).ok();
             if self.visible {
                 self.visible = false;
-                self.height = MIN_HEIGHT;
-                self.layer.set_size(0, MIN_HEIGHT);
+                self.height = PILL_SIZE;
+                self.layer.set_size(0, PILL_SIZE);
             }
             return;
         }
@@ -497,15 +535,11 @@ impl State {
         };
 
         let bg_alpha = 0.6 * self.fade_alpha;
-        let target_h = MIN_HEIGHT as f32 * sf;
+        let target_h = PILL_SIZE as f32 * sf;
 
-        // Measure pill label
+        // Pill shrinks to a circle for both recording and copied icons
         let is_recording_pill = self.listening || self.shrink_target < 0.5;
-        let pill_label = if is_recording_pill { "Recording" } else { "Copied" };
-        let pill_font_sz = self.font_size * sf;
-        let pill_text_w = self.measure_text_width(pill_label, pill_font_sz);
-        let dot_space = if is_recording_pill { DOT_RADIUS * sf * 2.0 + 8.0 * sf } else { 0.0 };
-        let target_w = (pill_text_w + dot_space + PADDING_X * sf * 2.0).max(target_h);
+        let target_w = target_h;
 
         // Background rect geometry
         let base_w = self.render_w.min(pw).max(target_h);
@@ -520,27 +554,31 @@ impl State {
             (rx, 0.0, base_w, ph)
         };
 
-        let r_top = if ease_t > 0.0 {
-            CORNER_RADIUS * sf + (rh / 2.0 - CORNER_RADIUS * sf) * ease_t
-        } else {
-            CORNER_RADIUS * sf
+        let r = CORNER_RADIUS * sf;
+        let is_circle = ease_t > 0.99;
+
+        // Helper: build the bg shape path
+        let cx = rx + rw / 2.0;
+        let cy = ry + rh / 2.0;
+        let make_bg_path = |inflate: f32| -> Path {
+            let mut p = Path::new();
+            if is_circle {
+                p.circle(cx, cy + inflate * 0.5, rh / 2.0 + inflate);
+            } else {
+                let ri = r + inflate;
+                p.rounded_rect(rx - inflate, ry - inflate, rw + inflate * 2.0, rh + inflate * 2.0, ri);
+            }
+            p
         };
-        let r_bot = rh / 2.0 * ease_t;
 
         // Drop shadow
         {
             let shadow_expand = SHADOW_FEATHER * sf;
-            let mut shadow_path = Path::new();
-            shadow_path.rounded_rect_varying(
-                rx - shadow_expand, ry - shadow_expand + SHADOW_OFFSET_Y * sf,
-                rw + shadow_expand * 2.0, rh + shadow_expand * 2.0,
-                r_top + shadow_expand, r_top + shadow_expand,
-                r_bot + shadow_expand, r_bot + shadow_expand,
-            );
+            let shadow_path = make_bg_path(shadow_expand);
             let shadow_paint = Paint::box_gradient(
                 rx, ry + SHADOW_OFFSET_Y * sf,
                 rw, rh,
-                (r_top + r_bot) / 2.0,
+                if is_circle { rh / 2.0 } else { r },
                 SHADOW_FEATHER * sf,
                 Color::rgbaf(0.0, 0.0, 0.0, 0.3 * self.fade_alpha),
                 Color::rgbaf(0.0, 0.0, 0.0, 0.0),
@@ -550,8 +588,7 @@ impl State {
 
         // Background
         {
-            let mut bg_path = Path::new();
-            bg_path.rounded_rect_varying(rx, ry, rw, rh, r_top, r_top, r_bot, r_bot);
+            let bg_path = make_bg_path(0.0);
             let bg_paint = Paint::color(Color::rgbaf(0.0, 0.0, 0.0, bg_alpha));
             self.canvas.fill_path(&bg_path, &bg_paint);
 
@@ -569,35 +606,18 @@ impl State {
 
         let show_pill = (self.listening || self.pill_countdown > 0.0 || pill_alpha > 0.0) && ease_t > 0.5;
 
-        // Pill label (Recording / Copied)
+        // Pill icons: microphone for recording, checkmark for copied
         if show_pill {
-            let dot_r = DOT_RADIUS * sf;
-
-            // Red dot for recording
+            let cx = rx + rw / 2.0;
+            let cy = ry + rh / 2.0;
+            let icon_s = rh * 0.4;
             if is_recording_pill {
                 let pulse = (self.anim_phase.sin() * 0.5 + 0.5) * 0.4 + 0.6;
-                let dot_a = pulse * pill_alpha;
-                let ind_x = rx + PADDING_X * sf + dot_r;
-                let ind_y = ry + rh / 2.0;
-                let mut dot_path = Path::new();
-                dot_path.circle(ind_x, ind_y, dot_r);
-                self.canvas.fill_path(&dot_path, &Paint::color(Color::rgbaf(0.88, 0.25, 0.25, dot_a)));
-            }
-
-            let label_color = if is_recording_pill {
-                Color::rgbaf(0.6, 0.6, 0.6, pill_alpha)
+                let a = pulse * pill_alpha;
+                self.draw_mic_icon(cx, cy, icon_s, Color::rgbaf(0.88, 0.25, 0.25, a));
             } else {
-                Color::rgbaf(0.8, 0.8, 0.8, pill_alpha)
-            };
-            let dot_offset = if is_recording_pill { dot_r * 2.0 + 8.0 * sf } else { 0.0 };
-            let text_x = rx + PADDING_X * sf + dot_offset;
-            let text_y = ry + rh / 2.0;
-
-            let mut paint = Paint::color(label_color);
-            paint.set_font(&[self.font_id]);
-            paint.set_font_size(pill_font_sz);
-            paint.set_text_baseline(Baseline::Middle);
-            let _ = self.canvas.fill_text(text_x, text_y, pill_label, &paint);
+                self.draw_check_icon(cx, cy, icon_s, Color::rgbaf(0.8, 0.8, 0.8, pill_alpha));
+            }
         }
 
         // Normal transcript text
@@ -620,7 +640,7 @@ impl State {
             // Clip to background rect
             self.canvas.save();
             let mut clip = Path::new();
-            clip.rounded_rect_varying(rx, ry, rw, rh, r_top, r_top, r_bot, r_bot);
+            clip.rounded_rect(rx, ry, rw, rh, r);
             self.canvas.intersect_scissor(rx, ry, rw, rh);
 
             // Determine where final text ends and pending starts
@@ -631,13 +651,7 @@ impl State {
             };
             let final_with_sep = format!("{final_text}{separator}");
 
-            // Pending alpha with pulse
-            let pending_alpha = if pending_text.is_empty() {
-                0.0
-            } else {
-                let pulse = self.anim_phase.sin() * 0.5 + 0.5;
-                (0.3 + pulse * 0.3) * text_alpha
-            };
+            let pending_alpha = text_alpha * 0.5;
 
             // Render each line, coloring final vs pending portions
             let base_y = ph - PADDING_Y * sf - total_text_h + scroll_y;
@@ -663,7 +677,7 @@ impl State {
                     let _ = self.canvas.fill_text(text_x, y, line, &paint);
                 } else if line_start >= split_at {
                     // Entire line is pending
-                    let mut paint = Paint::color(Color::rgbaf(0.53, 0.53, 0.67, pending_alpha));
+                    let mut paint = Paint::color(Color::rgbaf(0.6, 0.6, 0.6, pending_alpha));
                     paint.set_font(&[self.font_id]);
                     paint.set_font_size(font_sz);
                     paint.set_text_baseline(Baseline::Middle);
@@ -682,7 +696,7 @@ impl State {
 
                     if !pending_part.is_empty() {
                         let final_w = self.measure_text_width(final_part, font_sz);
-                        let mut pp = Paint::color(Color::rgbaf(0.53, 0.53, 0.67, pending_alpha));
+                        let mut pp = Paint::color(Color::rgbaf(0.6, 0.6, 0.6, pending_alpha));
                         pp.set_font(&[self.font_id]);
                         pp.set_font_size(font_sz);
                         pp.set_text_baseline(Baseline::Middle);
