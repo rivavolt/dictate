@@ -28,10 +28,10 @@ const PADDING_Y: f32 = 8.0;
 const OVERLAY_WIDTH_FRAC: f64 = 0.618;
 const CHAR_WIDTH_RATIO: f32 = 0.47;
 const CORNER_RADIUS: f32 = 12.0;
-const FADE_DURATION_MS: f32 = 150.0;
 const SHRINK_DURATION_MS: f32 = 150.0;
-const WIDTH_ANIM_MS: f32 = 100.0;
-const HEIGHT_ANIM_MS: f32 = 120.0;
+const FADE_TAU: f32 = 40.0;
+const WIDTH_TAU: f32 = 50.0;
+const HEIGHT_TAU: f32 = 50.0;
 const SHADOW_FEATHER: f32 = 20.0;
 const SHADOW_OFFSET_Y: f32 = 4.0;
 const SHADOW_PAD: u32 = 24;
@@ -214,6 +214,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         line_height: 24.0,
         scale: 1,
         frame_ms: 16,
+        last_tick: std::time::Instant::now(),
+        committed_layer_h: PILL_SIZE + SHADOW_PAD,
         exit: false,
     };
 
@@ -248,7 +250,9 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     let init_h = (PILL_SIZE + SHADOW_PAD) as f32;
                     state.height = init_h;
                     state.target_height = init_h;
+                    state.committed_layer_h = init_h as u32;
                     state.layer.set_size(0, init_h as u32);
+                    state.last_tick = std::time::Instant::now();
                     state.resize_and_redraw();
                 }
                 Command::SetText(text) => {
@@ -358,7 +362,19 @@ struct State {
     line_height: f32,
     scale: i32,
     frame_ms: u64,
+    last_tick: std::time::Instant,
+    committed_layer_h: u32,
     exit: bool,
+}
+
+fn chase(current: &mut f32, target: f32, tau: f32, dt: f32, epsilon: f32) -> bool {
+    let diff = target - *current;
+    if diff.abs() <= epsilon {
+        *current = target;
+        return false;
+    }
+    *current += diff * (1.0 - (-dt / tau).exp());
+    true
 }
 
 impl State {
@@ -378,19 +394,18 @@ impl State {
         if !self.visible {
             return;
         }
+        let dt = self.last_tick.elapsed().as_secs_f32() * 1000.0;
+        self.last_tick = std::time::Instant::now();
         let mut needs_redraw = false;
 
-        // Fade animation (eased)
-        if (self.fade_alpha - self.fade_target).abs() > 0.01 {
-            let step = self.frame_ms as f32 / FADE_DURATION_MS;
-            let diff = self.fade_target - self.fade_alpha;
-            self.fade_alpha += diff * (step * 3.0).min(1.0);
+        // Fade animation (exponential chase)
+        if chase(&mut self.fade_alpha, self.fade_target, FADE_TAU, dt, 0.01) {
             needs_redraw = true;
         }
 
-        // Pill ↔ full morph animation
+        // Pill ↔ full morph animation (linear, cubic ease applied in render)
         if (self.shrink_t - self.shrink_target).abs() > 0.01 {
-            let step = self.frame_ms as f32 / SHRINK_DURATION_MS;
+            let step = dt / SHRINK_DURATION_MS;
             if self.shrink_target > self.shrink_t {
                 self.shrink_t = (self.shrink_t + step).min(1.0);
             } else {
@@ -404,7 +419,7 @@ impl State {
 
         // "Copied" pill hold → fade
         if self.pill_countdown > 0.0 {
-            self.pill_countdown -= self.frame_ms as f32 / 1000.0;
+            self.pill_countdown -= dt / 1000.0;
             if self.pill_countdown <= 0.0 {
                 self.pill_countdown = 0.0;
                 self.fade_target = 0.0;
@@ -412,31 +427,24 @@ impl State {
             needs_redraw = true;
         }
 
-        // Width animation (compact mode)
-        if (self.render_w - self.content_pw).abs() > 1.0 {
-            let step = (self.content_pw - self.render_w) * (self.frame_ms as f32 / WIDTH_ANIM_MS).min(1.0);
-            self.render_w += step;
+        // Width animation (exponential chase)
+        if chase(&mut self.render_w, self.content_pw, WIDTH_TAU, dt, 1.0) {
             needs_redraw = true;
-        } else if self.content_pw > 0.0 {
-            self.render_w = self.content_pw;
         }
 
-        // Height animation
-        if (self.height - self.target_height).abs() > 0.5 {
-            let diff = self.target_height - self.height;
-            let step = diff * (self.frame_ms as f32 / HEIGHT_ANIM_MS).min(1.0);
-            self.height += step;
-            if (self.height - self.target_height).abs() <= 0.5 {
-                self.height = self.target_height;
-            }
+        // Height animation (exponential chase, only set_size when integer height changes)
+        if chase(&mut self.height, self.target_height, HEIGHT_TAU, dt, 0.5) {
             let layer_h = self.height.round() as u32;
-            self.layer.set_size(0, layer_h);
+            if layer_h != self.committed_layer_h {
+                self.committed_layer_h = layer_h;
+                self.layer.set_size(0, layer_h);
+            }
             needs_redraw = true;
         }
 
         // Pulse animation for listening/processing indicator
         if self.listening || self.processing {
-            self.anim_phase += std::f32::consts::TAU * self.frame_ms as f32 / 1000.0;
+            self.anim_phase += std::f32::consts::TAU * dt / 1000.0;
             needs_redraw = true;
         }
 
@@ -869,8 +877,10 @@ impl LayerShellHandler for State {
             self.width = w;
         }
 
-        if configure.new_size.1 > 0 {
-            self.height = configure.new_size.1 as f32;
+        if configure.new_size.1 > 0 && (self.height - self.target_height).abs() <= 0.5 {
+            let h = configure.new_size.1 as f32;
+            self.height = h;
+            self.target_height = h;
         }
         self.configured = true;
         self.redraw();
