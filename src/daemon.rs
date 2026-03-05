@@ -70,6 +70,20 @@ impl DaemonState {
         }
     }
 
+    fn sync_tray_state(&self) {
+        if let Some(tray) = self.tray_handle.clone() {
+            let state = self.state.clone();
+            let recording = self.recording;
+            tokio::spawn(async move {
+                tray.update(|t| {
+                    t.set_recording(recording);
+                    t.set_state(&state);
+                })
+                .await;
+            });
+        }
+    }
+
     fn start_recording(&mut self) -> Result<String> {
         if self.recording {
             return Ok("already recording".into());
@@ -78,9 +92,6 @@ impl DaemonState {
         self.recording = true;
         fs::write(&self.config.state_file, "recording")?;
         sound::play_start();
-        if let Some(tray) = self.tray_handle.clone() {
-            tokio::spawn(async move { tray.update(|t| t.set_recording(true)).await; });
-        }
         self.overlay.show();
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -340,9 +351,6 @@ impl DaemonState {
 
         self.recording = false;
         fs::write(&self.config.state_file, "idle")?;
-        if let Some(tray) = self.tray_handle.clone() {
-            tokio::spawn(async move { tray.update(|t| t.set_recording(false)).await; });
-        }
 
         Ok("stopped".into())
     }
@@ -557,7 +565,7 @@ impl DaemonState {
 }
 
 pub async fn run() -> Result<()> {
-    let (tray_tx, mut tray_rx) = mpsc::channel::<()>(4);
+    let (tray_tx, mut tray_rx) = mpsc::channel::<tray::TrayCommand>(16);
     let tray_handle = match tray::spawn(tray_tx).await {
         Ok(h) => Some(h),
         Err(e) => {
@@ -608,15 +616,37 @@ pub async fn run() -> Result<()> {
     });
 
     tracing::info!("daemon ready");
+    daemon.sync_tray_state();
 
     loop {
         tokio::select! {
             Some((req, resp_tx)) = ipc_rx.recv() => {
                 let resp = daemon.handle_command(req);
                 let _ = resp_tx.send(resp);
+                daemon.sync_tray_state();
             }
-            Some(()) = tray_rx.recv() => {
-                let _ = daemon.toggle_recording();
+            Some(cmd) = tray_rx.recv() => {
+                match cmd {
+                    tray::TrayCommand::Toggle => {
+                        let _ = daemon.toggle_recording();
+                    }
+                    tray::TrayCommand::SetMode(m) => {
+                        daemon.handle_command(ipc::Request { command: "mode".into(), arg: Some(m) });
+                    }
+                    tray::TrayCommand::SetOutput(o) => {
+                        daemon.handle_command(ipc::Request { command: "output".into(), arg: Some(o) });
+                    }
+                    tray::TrayCommand::SetLang(l) => {
+                        daemon.handle_command(ipc::Request { command: "lang".into(), arg: Some(l) });
+                    }
+                    tray::TrayCommand::SetModel(m) => {
+                        daemon.handle_command(ipc::Request { command: "model".into(), arg: Some(m) });
+                    }
+                    tray::TrayCommand::ToggleEnter => {
+                        daemon.handle_command(ipc::Request { command: "enter".into(), arg: None });
+                    }
+                }
+                daemon.sync_tray_state();
             }
             Some(ev) = fn_rx.recv() => {
                 match ev {
@@ -629,6 +659,7 @@ pub async fn run() -> Result<()> {
                         }
                     }
                 }
+                daemon.sync_tray_state();
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");

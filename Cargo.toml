@@ -32,6 +32,4 @@ khronos-egl = { version = "6", features = ["dynamic"] }
 wayland-egl = "0.32"
 
 [profile.release]
-lto = true
 strip = true
-codegen-units = 1
