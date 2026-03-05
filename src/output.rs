@@ -31,6 +31,16 @@ pub fn type_text(text: &str) {
     }
 }
 
+pub fn type_enter() {
+    if let Ok(mut guard) = get_client().lock() {
+        if let Some(client) = guard.as_mut() {
+            if let Err(e) = client.type_key("Return") {
+                tracing::error!("type_enter failed: {e}");
+            }
+        }
+    }
+}
+
 pub fn append_history(path: &std::path::Path, text: &str) {
     if text.is_empty() {
         return;

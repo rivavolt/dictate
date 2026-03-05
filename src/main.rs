@@ -50,6 +50,11 @@ enum Commands {
         #[arg(value_parser = ["type", "clipboard"])]
         output: Option<String>,
     },
+    /// Toggle or set enter-after-type (on, off). Presses Enter after typing in type mode
+    Enter {
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
+    },
     /// Set or show overlay font (e.g. "Inter", "JetBrains Mono")
     Font { font: Option<String> },
     /// Set or show model (provider/model). Providers: deepgram, groq, fireworks
@@ -109,6 +114,10 @@ async fn main() -> Result<()> {
                 Commands::Output { output } => ipc::Request {
                     command: "output".into(),
                     arg: output,
+                },
+                Commands::Enter { state } => ipc::Request {
+                    command: "enter".into(),
+                    arg: state,
                 },
                 Commands::Font { font } => ipc::Request {
                     command: "font".into(),

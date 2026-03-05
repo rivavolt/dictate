@@ -136,6 +136,7 @@ pub struct Config {
     pub mode_file: PathBuf,
     pub output_file: PathBuf,
     pub font_file: PathBuf,
+    pub enter_file: PathBuf,
     pub model_file: PathBuf,
     pub history_file: PathBuf,
     pub socket_path: PathBuf,
@@ -159,6 +160,7 @@ impl Config {
             mode_file: state_dir.join("mode"),
             output_file: state_dir.join("output"),
             font_file: state_dir.join("font"),
+            enter_file: state_dir.join("enter"),
             model_file: state_dir.join("model"),
             history_file: state_dir.join("history.log"),
             socket_path: runtime_dir.join("dictate.sock"),
@@ -201,6 +203,7 @@ pub struct State {
     pub model: String,
     pub mode: String,
     pub output: String,
+    pub enter: bool,
     pub font: String,
 }
 
@@ -229,12 +232,16 @@ impl State {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "type".to_string());
 
+        let enter = fs::read_to_string(&config.enter_file)
+            .map(|s| s.trim() == "true")
+            .unwrap_or(false);
+
         let font = fs::read_to_string(&config.font_file)
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| {
                 std::env::var("DICTATE_FONT").unwrap_or_else(|_| "Inter".to_string())
             });
 
-        Self { lang, model, mode, output, font }
+        Self { lang, model, mode, output, enter, font }
     }
 }
