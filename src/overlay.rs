@@ -34,6 +34,7 @@ const WIDTH_ANIM_MS: f32 = 100.0;
 const HEIGHT_ANIM_MS: f32 = 120.0;
 const SHADOW_FEATHER: f32 = 20.0;
 const SHADOW_OFFSET_Y: f32 = 4.0;
+const SHADOW_PAD: u32 = 24;
 
 pub enum Command {
     Show,
@@ -116,7 +117,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
     );
 
     layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_size(0, PILL_SIZE);
+    layer.set_size(0, PILL_SIZE + SHADOW_PAD);
     layer.set_exclusive_zone(0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
 
@@ -156,7 +157,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
     let wl_egl_surface = wayland_egl::WlEglSurface::new(
         layer.wl_surface().id(),
         PILL_SIZE as i32,
-        PILL_SIZE as i32,
+        (PILL_SIZE + SHADOW_PAD) as i32,
     )?;
 
     let egl_surface = unsafe {
@@ -206,8 +207,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         configured: false,
         screen_width: 0,
         width: 0,
-        height: PILL_SIZE,
-        target_height: PILL_SIZE,
+        height: (PILL_SIZE + SHADOW_PAD) as f32,
+        target_height: (PILL_SIZE + SHADOW_PAD) as f32,
         max_height: 400,
         font_size: 16.0,
         line_height: 24.0,
@@ -244,9 +245,10 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     let pill_w = PILL_SIZE as f32 * state.scale as f32;
                     state.content_pw = pill_w;
                     state.render_w = pill_w * 0.7;
-                    state.height = PILL_SIZE;
-                    state.target_height = PILL_SIZE;
-                    state.layer.set_size(0, PILL_SIZE);
+                    let init_h = (PILL_SIZE + SHADOW_PAD) as f32;
+                    state.height = init_h;
+                    state.target_height = init_h;
+                    state.layer.set_size(0, init_h as u32);
                     state.resize_and_redraw();
                 }
                 Command::SetText(text) => {
@@ -349,8 +351,8 @@ struct State {
     configured: bool,
     screen_width: u32,
     width: u32,
-    height: u32,
-    target_height: u32,
+    height: f32,
+    target_height: f32,
     max_height: u32,
     font_size: f32,
     line_height: f32,
@@ -366,7 +368,7 @@ impl State {
             || (self.shrink_t - self.shrink_target).abs() > 0.01
             || self.pill_countdown > 0.0
             || (self.render_w - self.content_pw).abs() > 1.0
-            || self.height != self.target_height
+            || (self.height - self.target_height).abs() > 0.5
             || self.listening
             || self.processing
         )
@@ -420,19 +422,15 @@ impl State {
         }
 
         // Height animation
-        if self.height != self.target_height {
-            let diff = self.target_height as f32 - self.height as f32;
+        if (self.height - self.target_height).abs() > 0.5 {
+            let diff = self.target_height - self.height;
             let step = diff * (self.frame_ms as f32 / HEIGHT_ANIM_MS).min(1.0);
-            let new_h = (self.height as f32 + step).round() as u32;
-            let new_h = if (new_h as i32 - self.target_height as i32).unsigned_abs() <= 1 {
-                self.target_height
-            } else {
-                new_h
-            };
-            if new_h != self.height {
-                self.height = new_h;
-                self.layer.set_size(0, new_h);
+            self.height += step;
+            if (self.height - self.target_height).abs() <= 0.5 {
+                self.height = self.target_height;
             }
+            let layer_h = self.height.round() as u32;
+            self.layer.set_size(0, layer_h);
             needs_redraw = true;
         }
 
@@ -585,7 +583,7 @@ impl State {
         if !self.configured || self.width == 0 {
             return;
         }
-        let h = self.compute_height();
+        let h = (self.compute_height() + SHADOW_PAD) as f32;
         self.target_height = h;
         self.redraw();
     }
@@ -598,12 +596,14 @@ impl State {
         let s = self.scale;
         let sf = s as f32;
         let pw = (self.width * s as u32) as f32;
-        let ph = (self.height * s as u32) as f32;
+        let layer_h = self.height * sf;
+        let pad = SHADOW_PAD as f32 * sf;
+        let ph = (layer_h - pad).max(1.0);
 
         // Resize EGL surface
-        self.wl_egl_surface.resize(pw as i32, ph as i32, 0, 0);
-        self.canvas.set_size(pw as u32, ph as u32, 1.0);
-        self.canvas.clear_rect(0, 0, pw as u32, ph as u32, Color::rgbaf(0.0, 0.0, 0.0, 0.0));
+        self.wl_egl_surface.resize(pw as i32, layer_h as i32, 0, 0);
+        self.canvas.set_size(pw as u32, layer_h as u32, 1.0);
+        self.canvas.clear_rect(0, 0, pw as u32, layer_h as u32, Color::rgbaf(0.0, 0.0, 0.0, 0.0));
 
         // Fully faded out — just clear and mark invisible
         if self.fade_alpha <= 0.01 && self.fade_target <= 0.0 {
@@ -628,17 +628,17 @@ impl State {
         let is_recording_pill = self.listening || self.shrink_target < 0.5;
         let target_w = target_h;
 
-        // Background rect geometry
+        // Background rect geometry (content area starts at y=pad)
         let base_w = self.render_w.min(pw).max(target_h);
         let (rx, ry, rw, rh) = if ease_t > 0.0 {
             let rw = base_w + (target_w - base_w) * ease_t;
             let rh = ph + (target_h - ph) * ease_t;
             let rx = (pw - rw) / 2.0;
-            let ry = ph - rh;
+            let ry = pad + ph - rh;
             (rx, ry, rw, rh)
         } else {
             let rx = (pw - base_w) / 2.0;
-            (rx, 0.0, base_w, ph)
+            (rx, pad, base_w, ph)
         };
 
         let r = CORNER_RADIUS * sf;
@@ -747,7 +747,7 @@ impl State {
             // Track position in the display string by finding each wrapped line's
             // start via str::find, which is correct for any UTF-8 content.
             let split_at = final_with_sep.len();
-            let base_y = ph - PADDING_Y * sf - total_text_h + scroll_y;
+            let base_y = pad + ph - PADDING_Y * sf - total_text_h + scroll_y;
             let mut display_pos = 0usize;
 
             let mut final_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, text_alpha));
@@ -771,7 +771,7 @@ impl State {
                 let line_end = display_pos + line.len();
                 display_pos = line_end;
 
-                if y < -self.line_height * sf || y > ph + self.line_height * sf {
+                if y < -self.line_height * sf || y > layer_h + self.line_height * sf {
                     continue;
                 }
 
@@ -862,7 +862,7 @@ impl LayerShellHandler for State {
             self.line_height = self.font_size * 1.5;
             let golden_h = (overlay_w as f32 / 1.618) as u32;
             let max_lines = ((golden_h as f32 - PADDING_Y * 2.0) / self.line_height).floor().max(1.0) as u32;
-            self.max_height = PADDING_Y as u32 * 2 + max_lines * self.line_height as u32;
+            self.max_height = PADDING_Y as u32 * 2 + max_lines * self.line_height as u32 + SHADOW_PAD;
             self.layer.set_margin(0, margin_h, margin_b, margin_h);
             self.width = overlay_w;
         } else {
@@ -870,7 +870,7 @@ impl LayerShellHandler for State {
         }
 
         if configure.new_size.1 > 0 {
-            self.height = configure.new_size.1;
+            self.height = configure.new_size.1 as f32;
         }
         self.configured = true;
         self.redraw();
