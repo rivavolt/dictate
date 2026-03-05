@@ -88,94 +88,97 @@ impl Tray for DictateTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        let tx = self.cmd_tx.clone();
         let mode_menu = SubMenu {
             label: "Mode".into(),
-            submenu: MODES
-                .iter()
-                .zip(MODE_LABELS.iter())
-                .enumerate()
-                .map(|(i, (&val, &label))| {
-                    let val = val.to_string();
-                    CheckmarkItem {
-                        label: label.into(),
-                        checked: self.mode == i,
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.mode = i;
-                            let _ = tray.cmd_tx.try_send(TrayCommand::SetMode(val.clone()));
-                        }),
-                        ..Default::default()
+            submenu: vec![RadioGroup {
+                selected: self.mode,
+                select: Box::new(move |tray: &mut Self, idx| {
+                    tray.mode = idx;
+                    if let Some(&m) = MODES.get(idx) {
+                        let _ = tx.try_send(TrayCommand::SetMode(m.into()));
                     }
-                    .into()
-                })
-                .collect(),
+                }),
+                options: MODE_LABELS
+                    .iter()
+                    .map(|&l| RadioItem {
+                        label: l.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
             ..Default::default()
         };
 
+        let tx = self.cmd_tx.clone();
         let output_menu = SubMenu {
             label: "Output".into(),
-            submenu: OUTPUTS
-                .iter()
-                .zip(OUTPUT_LABELS.iter())
-                .enumerate()
-                .map(|(i, (&val, &label))| {
-                    let val = val.to_string();
-                    CheckmarkItem {
-                        label: label.into(),
-                        checked: self.output == i,
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.output = i;
-                            let _ = tray.cmd_tx.try_send(TrayCommand::SetOutput(val.clone()));
-                        }),
-                        ..Default::default()
+            submenu: vec![RadioGroup {
+                selected: self.output,
+                select: Box::new(move |tray: &mut Self, idx| {
+                    tray.output = idx;
+                    if let Some(&o) = OUTPUTS.get(idx) {
+                        let _ = tx.try_send(TrayCommand::SetOutput(o.into()));
                     }
-                    .into()
-                })
-                .collect(),
+                }),
+                options: OUTPUT_LABELS
+                    .iter()
+                    .map(|&l| RadioItem {
+                        label: l.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
             ..Default::default()
         };
 
+        let langs = self.langs.clone();
+        let tx = self.cmd_tx.clone();
         let lang_menu = SubMenu {
             label: "Language".into(),
-            submenu: self
-                .langs
-                .iter()
-                .enumerate()
-                .map(|(i, &(code, name))| {
-                    let code = code.to_string();
-                    CheckmarkItem {
-                        label: name.into(),
-                        checked: self.lang == i,
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.lang = i;
-                            let _ = tray.cmd_tx.try_send(TrayCommand::SetLang(code.clone()));
-                        }),
-                        ..Default::default()
+            submenu: vec![RadioGroup {
+                selected: self.lang,
+                select: Box::new(move |tray: &mut Self, idx| {
+                    tray.lang = idx;
+                    if let Some(&(code, _)) = langs.get(idx) {
+                        let _ = tx.try_send(TrayCommand::SetLang(code.into()));
                     }
-                    .into()
-                })
-                .collect(),
+                }),
+                options: self
+                    .langs
+                    .iter()
+                    .map(|&(_, name)| RadioItem {
+                        label: name.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
             ..Default::default()
         };
 
+        let tx = self.cmd_tx.clone();
         let model_menu = SubMenu {
             label: "Model".into(),
-            submenu: config::ALL_MODELS
-                .iter()
-                .enumerate()
-                .map(|(i, &m)| {
-                    let val = m.to_string();
-                    CheckmarkItem {
-                        label: m.into(),
-                        checked: self.model == i,
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.model = i;
-                            let _ = tray.cmd_tx.try_send(TrayCommand::SetModel(val.clone()));
-                        }),
-                        ..Default::default()
+            submenu: vec![RadioGroup {
+                selected: self.model,
+                select: Box::new(move |tray: &mut Self, idx| {
+                    tray.model = idx;
+                    if let Some(&m) = config::ALL_MODELS.get(idx) {
+                        let _ = tx.try_send(TrayCommand::SetModel(m.into()));
                     }
-                    .into()
-                })
-                .collect(),
+                }),
+                options: config::ALL_MODELS
+                    .iter()
+                    .map(|&m| RadioItem {
+                        label: m.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
             ..Default::default()
         };
 
