@@ -44,6 +44,12 @@ fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     cursor.into_inner()
 }
 
+fn decode_frame(buf: &[u8], frame: &mut [i16; FRAME_SAMPLES]) {
+    for (i, chunk) in buf[..FRAME_BYTES].chunks_exact(2).enumerate() {
+        frame[i] = i16::from_le_bytes([chunk[0], chunk[1]]);
+    }
+}
+
 pub async fn stream_vad(
     mut audio_rx: mpsc::Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
@@ -62,11 +68,12 @@ pub async fn stream_vad(
     let mut vad = SendVad(Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive));
 
     let mut buf: Vec<u8> = Vec::new();
+    let mut frame = [0i16; FRAME_SAMPLES];
     let mut speech_active = false;
     let mut silence_count: usize = 0;
     let mut voice_count: usize = 0;
     let mut speech_samples: Vec<i16> = Vec::new();
-    let mut pre_buffer: VecDeque<Vec<i16>> = VecDeque::new();
+    let mut pre_buffer: VecDeque<[i16; FRAME_SAMPLES]> = VecDeque::new();
     let mut full_transcript = String::new();
 
     let _ = std::fs::write(&transcript_file, "");
@@ -81,11 +88,8 @@ pub async fn stream_vad(
         buf.extend_from_slice(&chunk);
 
         while buf.len() >= FRAME_BYTES {
-            let frame_bytes: Vec<u8> = buf.drain(..FRAME_BYTES).collect();
-            let frame: Vec<i16> = frame_bytes
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]))
-                .collect();
+            decode_frame(&buf, &mut frame);
+            buf.drain(..FRAME_BYTES);
 
             let is_voice = vad.is_voice_segment(&frame);
 
@@ -183,7 +187,7 @@ async fn transcribe_chunk(
     full_transcript: &mut String,
 ) {
     let wav = encode_wav(samples, sample_rate);
-    if let Err(e) = std::fs::write(chunk_file, &wav) {
+    if let Err(e) = tokio::fs::write(chunk_file, &wav).await {
         tracing::error!("failed to write chunk: {e}");
         return;
     }
@@ -200,12 +204,12 @@ async fn transcribe_chunk(
             if output_mode != "clipboard" {
                 output::type_text(&transcript);
             }
-            let _ = std::fs::write(transcript_file, full_transcript.as_str());
+            let _ = tokio::fs::write(transcript_file, full_transcript.as_str()).await;
             overlay.set_text(full_transcript.clone());
         }
         Err(e) => tracing::error!("vad transcribe error: {e}"),
         _ => {}
     }
 
-    let _ = std::fs::remove_file(chunk_file);
+    let _ = tokio::fs::remove_file(chunk_file).await;
 }
