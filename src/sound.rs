@@ -25,8 +25,7 @@ fn tone_wav(freq: f32, duration_ms: u32, sample_rate: u32) -> Vec<u8> {
 
     for i in 0..num_samples {
         let t = i as f32 / sample_rate as f32;
-        // Fade envelope to avoid clicks
-        let fade_samples = sample_rate * 5 / 1000; // 5ms fade
+        let fade_samples = sample_rate * 5 / 1000;
         let envelope = if i < fade_samples {
             i as f32 / fade_samples as f32
         } else if i > num_samples - fade_samples {

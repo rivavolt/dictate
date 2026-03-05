@@ -81,9 +81,7 @@ impl DaemonState {
         if let Some(tray) = self.tray_handle.clone() {
             tokio::spawn(async move { tray.update(|t| t.set_recording(true)).await; });
         }
-        if self.state.output == "clipboard" {
-            self.overlay.show();
-        }
+        self.overlay.show();
 
         let stop = Arc::new(AtomicBool::new(false));
         self.stop_flag = Some(stop.clone());
@@ -115,6 +113,7 @@ impl DaemonState {
         let (tx, mut rx) = mpsc::unbounded_channel::<TranscriptEvent>();
 
         let output_mode = self.state.output.clone();
+        let enter_after = self.state.enter;
         let transcript_file = self.config.transcript_file.clone();
         let history_file = self.config.history_file.clone();
         let overlay_handle = self.overlay.clone();
@@ -129,9 +128,8 @@ impl DaemonState {
                     match event {
                         TranscriptEvent::Final { delta, accumulated } => {
                             tracing::info!("transcript: {delta}");
-                            if is_clipboard {
-                                overlay_handle.set_text(accumulated.clone());
-                            } else {
+                            overlay_handle.set_text(accumulated.clone());
+                            if !is_clipboard {
                                 output::type_text(&delta);
                             }
                             let _ = std::fs::write(&transcript_file, &accumulated);
@@ -139,9 +137,7 @@ impl DaemonState {
                             last_pending.clear();
                         }
                         TranscriptEvent::Interim(text) => {
-                            if is_clipboard {
-                                overlay_handle.set_pending(text.clone());
-                            }
+                            overlay_handle.set_pending(text.clone());
                             last_pending = text;
                         }
                     }
@@ -153,22 +149,22 @@ impl DaemonState {
                     }
                     last_accumulated.push_str(&last_pending);
                     tracing::info!("transcript (flushed pending): {last_pending}");
-                    if is_clipboard {
-                        output::copy_to_clipboard(&last_accumulated);
-                        overlay_handle.set_text(last_accumulated.clone());
-                    } else {
+                    overlay_handle.set_text(last_accumulated.clone());
+                    if !is_clipboard {
                         output::type_text(&last_pending);
-                        output::copy_to_clipboard(&last_accumulated);
                     }
+                    output::copy_to_clipboard(&last_accumulated);
                     let _ = std::fs::write(&transcript_file, &last_accumulated);
                 }
                 if !last_accumulated.is_empty() {
                     output::copy_to_clipboard(&last_accumulated);
                 }
-                output::append_history(&history_file, &last_accumulated);
-                if is_clipboard {
-                    overlay_handle.copied();
+                if enter_after && !is_clipboard && !last_accumulated.is_empty() {
+                    output::type_enter();
                 }
+                output::append_history(&history_file, &last_accumulated);
+                sound::play_stop();
+                overlay_handle.copied();
             });
 
             let result = match provider.as_str() {
@@ -192,9 +188,11 @@ impl DaemonState {
     fn start_batch(&mut self, stop: Arc<AtomicBool>, provider: &str) -> Result<()> {
         let audio_file = self.config.audio_file.clone();
         let state = self.state.clone();
+        let enter_after = self.state.enter;
         let transcript_file = self.config.transcript_file.clone();
         let history_file = self.config.history_file.clone();
         let provider = provider.to_string();
+        let overlay_handle = self.overlay.clone();
 
         self.record_handle = Some(tokio::spawn(async move {
             let audio_file2 = audio_file.clone();
@@ -206,6 +204,8 @@ impl DaemonState {
             while !stop.load(Ordering::Relaxed) {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+
+            overlay_handle.processing();
 
             if let Err(e) = record.await {
                 tracing::error!("batch record error: {e}");
@@ -220,14 +220,20 @@ impl DaemonState {
                     output::copy_to_clipboard(&transcript);
                     if state.output != "clipboard" {
                         output::type_text(&transcript);
+                        if enter_after {
+                            output::type_enter();
+                        }
                     }
                     let _ = fs::write(&transcript_file, &transcript);
                     output::append_history(&history_file, &transcript);
+                    overlay_handle.set_text(transcript);
                 }
                 Err(e) => tracing::error!("batch transcribe error: {e}"),
                 _ => {}
             }
 
+            sound::play_stop();
+            overlay_handle.copied();
             let _ = fs::remove_file(&audio_file);
         }));
 
@@ -237,9 +243,11 @@ impl DaemonState {
     fn start_vad(&mut self, stop: Arc<AtomicBool>, provider: &str) -> Result<()> {
         let audio_file = self.config.audio_file.with_extension("chunk.wav");
         let state = self.state.clone();
+        let enter_after = self.state.enter;
         let transcript_file = self.config.transcript_file.clone();
         let history_file = self.config.history_file.clone();
         let provider = provider.to_string();
+        let overlay_handle = self.overlay.clone();
 
         self.record_handle = Some(tokio::spawn(async move {
             let mut full_transcript = String::new();
@@ -277,6 +285,8 @@ impl DaemonState {
                     continue;
                 }
 
+                overlay_handle.processing();
+
                 let (_, model) = config::parse_provider_model(&state.model);
                 let result = transcribe_with_retry(&audio_file, &provider, &state.lang, model).await;
 
@@ -291,6 +301,7 @@ impl DaemonState {
                             output::type_text(&transcript);
                         }
                         let _ = fs::write(&transcript_file, &full_transcript);
+                        overlay_handle.set_text(full_transcript.clone());
                     }
                     Err(e) => tracing::error!("vad transcribe error: {e}"),
                     _ => {}
@@ -300,7 +311,12 @@ impl DaemonState {
             }
 
             let _ = fs::remove_file(&audio_file);
+            if enter_after && state.output != "clipboard" && !full_transcript.trim().is_empty() {
+                output::type_enter();
+            }
             output::append_history(&history_file, full_transcript.trim());
+            sound::play_stop();
+            overlay_handle.copied();
         }));
 
         Ok(())
@@ -324,7 +340,6 @@ impl DaemonState {
 
         self.recording = false;
         fs::write(&self.config.state_file, "idle")?;
-        sound::play_stop();
         if let Some(tray) = self.tray_handle.clone() {
             tokio::spawn(async move { tray.update(|t| t.set_recording(false)).await; });
         }
@@ -438,6 +453,28 @@ impl DaemonState {
                     }
                 } else {
                     ipc::Response::ok(format!("font: {}", self.state.font))
+                }
+            }
+            "enter" => {
+                if let Some(v) = req.arg {
+                    match v.as_str() {
+                        "on" | "true" => {
+                            self.state.enter = true;
+                            let _ = fs::write(&self.config.enter_file, "true");
+                            ipc::Response::ok("enter: on")
+                        }
+                        "off" | "false" => {
+                            self.state.enter = false;
+                            let _ = fs::write(&self.config.enter_file, "false");
+                            ipc::Response::ok("enter: off")
+                        }
+                        _ => ipc::Response::err("invalid value. use: on, off"),
+                    }
+                } else {
+                    // Toggle
+                    self.state.enter = !self.state.enter;
+                    let _ = fs::write(&self.config.enter_file, if self.state.enter { "true" } else { "false" });
+                    ipc::Response::ok(format!("enter: {}", if self.state.enter { "on" } else { "off" }))
                 }
             }
             "output" => {

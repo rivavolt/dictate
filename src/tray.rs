@@ -26,7 +26,11 @@ impl Tray for DictateTray {
     }
 
     fn icon_name(&self) -> String {
-        "audio-input-microphone".into()
+        if self.recording {
+            "media-record".into()
+        } else {
+            "audio-input-microphone".into()
+        }
     }
 
     fn status(&self) -> ksni::Status {

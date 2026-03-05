@@ -31,6 +31,7 @@ const CORNER_RADIUS: f32 = 12.0;
 const FADE_DURATION_MS: f32 = 150.0;
 const SHRINK_DURATION_MS: f32 = 150.0;
 const WIDTH_ANIM_MS: f32 = 100.0;
+const HEIGHT_ANIM_MS: f32 = 120.0;
 const SHADOW_FEATHER: f32 = 20.0;
 const SHADOW_OFFSET_Y: f32 = 4.0;
 
@@ -38,6 +39,7 @@ pub enum Command {
     Show,
     SetText(String),
     SetPending(String),
+    Processing,
     Copied,
     SetFont(String),
 }
@@ -58,6 +60,10 @@ impl Handle {
 
     pub fn set_pending(&self, text: String) {
         let _ = self.tx.send(Command::SetPending(text));
+    }
+
+    pub fn processing(&self) {
+        let _ = self.tx.send(Command::Processing);
     }
 
     pub fn copied(&self) {
@@ -187,6 +193,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         wrapped_lines: Vec::new(),
         wrapped_dirty: true,
         listening: false,
+        processing: false,
         shrink_t: 0.0,
         shrink_target: 0.0,
         pill_countdown: 0.0,
@@ -200,6 +207,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         screen_width: 0,
         width: 0,
         height: PILL_SIZE,
+        target_height: PILL_SIZE,
         max_height: 400,
         font_size: 16.0,
         line_height: 24.0,
@@ -224,24 +232,29 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                 Command::Show => {
                     state.visible = true;
                     state.listening = true;
+                    state.processing = false;
                     state.shrink_t = 1.0;
                     state.shrink_target = 1.0;
                     state.pill_countdown = 0.0;
                     state.text.clear();
                     state.pending.clear();
                     state.wrapped_dirty = true;
-                    state.fade_alpha = 1.0;
+                    state.fade_alpha = 0.0;
                     state.fade_target = 1.0;
                     let pill_w = PILL_SIZE as f32 * state.scale as f32;
                     state.content_pw = pill_w;
-                    state.render_w = pill_w;
+                    state.render_w = pill_w * 0.7;
+                    state.height = PILL_SIZE;
+                    state.target_height = PILL_SIZE;
+                    state.layer.set_size(0, PILL_SIZE);
                     state.resize_and_redraw();
                 }
                 Command::SetText(text) => {
-                    if state.listening {
+                    if state.listening || state.processing {
                         state.shrink_target = 0.0;
                     }
                     state.listening = false;
+                    state.processing = false;
                     state.text = text;
                     state.pending.clear();
                     state.wrapped_dirty = true;
@@ -250,18 +263,26 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
                     }
                 }
                 Command::SetPending(text) => {
-                    if state.listening {
+                    if state.listening || state.processing {
                         state.shrink_target = 0.0;
                     }
                     state.listening = false;
+                    state.processing = false;
                     state.pending = text;
                     state.wrapped_dirty = true;
                     if state.visible {
                         state.resize_and_redraw();
                     }
                 }
+                Command::Processing => {
+                    state.listening = false;
+                    state.processing = true;
+                    state.shrink_target = 1.0;
+                    state.resize_and_redraw();
+                }
                 Command::Copied => {
                     state.listening = false;
+                    state.processing = false;
                     if state.text.is_empty() {
                         state.fade_target = 0.0;
                     } else {
@@ -315,6 +336,7 @@ struct State {
     wrapped_lines: Vec<String>,
     wrapped_dirty: bool,
     listening: bool,
+    processing: bool,
     shrink_t: f32,
     shrink_target: f32,
     pill_countdown: f32,
@@ -328,6 +350,7 @@ struct State {
     screen_width: u32,
     width: u32,
     height: u32,
+    target_height: u32,
     max_height: u32,
     font_size: f32,
     line_height: f32,
@@ -343,7 +366,9 @@ impl State {
             || (self.shrink_t - self.shrink_target).abs() > 0.01
             || self.pill_countdown > 0.0
             || (self.render_w - self.content_pw).abs() > 1.0
+            || self.height != self.target_height
             || self.listening
+            || self.processing
         )
     }
 
@@ -353,14 +378,11 @@ impl State {
         }
         let mut needs_redraw = false;
 
-        // Fade animation
+        // Fade animation (eased)
         if (self.fade_alpha - self.fade_target).abs() > 0.01 {
             let step = self.frame_ms as f32 / FADE_DURATION_MS;
-            if self.fade_target > self.fade_alpha {
-                self.fade_alpha = (self.fade_alpha + step).min(1.0);
-            } else {
-                self.fade_alpha = (self.fade_alpha - step).max(0.0);
-            }
+            let diff = self.fade_target - self.fade_alpha;
+            self.fade_alpha += diff * (step * 3.0).min(1.0);
             needs_redraw = true;
         }
 
@@ -372,8 +394,8 @@ impl State {
             } else {
                 self.shrink_t = (self.shrink_t - step).max(0.0);
             }
-            if self.shrink_t >= 1.0 && !self.listening {
-                self.pill_countdown = 0.6;
+            if self.shrink_t >= 1.0 && !self.listening && !self.processing {
+                self.pill_countdown = 1.2;
             }
             needs_redraw = true;
         }
@@ -397,9 +419,26 @@ impl State {
             self.render_w = self.content_pw;
         }
 
-        // Pulse animation for listening dot
-        if self.listening {
-            self.anim_phase += std::f32::consts::TAU * self.frame_ms as f32 / 1500.0;
+        // Height animation
+        if self.height != self.target_height {
+            let diff = self.target_height as f32 - self.height as f32;
+            let step = diff * (self.frame_ms as f32 / HEIGHT_ANIM_MS).min(1.0);
+            let new_h = (self.height as f32 + step).round() as u32;
+            let new_h = if (new_h as i32 - self.target_height as i32).unsigned_abs() <= 1 {
+                self.target_height
+            } else {
+                new_h
+            };
+            if new_h != self.height {
+                self.height = new_h;
+                self.layer.set_size(0, new_h);
+            }
+            needs_redraw = true;
+        }
+
+        // Pulse animation for listening/processing indicator
+        if self.listening || self.processing {
+            self.anim_phase += std::f32::consts::TAU * self.frame_ms as f32 / 1000.0;
             needs_redraw = true;
         }
 
@@ -419,7 +458,7 @@ impl State {
     }
 
     fn display_text(&self) -> String {
-        if self.listening {
+        if self.listening || self.processing {
             return String::new();
         }
         let mut full = self.text.clone();
@@ -517,7 +556,7 @@ impl State {
     }
 
     fn compute_height(&mut self) -> u32 {
-        if self.listening {
+        if self.listening || self.processing {
             return PILL_SIZE;
         }
         let sf = self.scale as f32;
@@ -547,10 +586,7 @@ impl State {
             return;
         }
         let h = self.compute_height();
-        if h != self.height {
-            self.height = h;
-            self.layer.set_size(0, h);
-        }
+        self.target_height = h;
         self.redraw();
     }
 
@@ -650,19 +686,27 @@ impl State {
         }
 
         // Text opacity
-        let text_opacity = (1.0 - ease_t * 4.0).max(0.0);
+        let text_opacity = (1.0 - ease_t * 3.0).max(0.0);
         let text_alpha = self.fade_alpha * text_opacity;
-        let pill_label_opacity = if ease_t > 0.5 { ((ease_t - 0.5) * 2.0).min(1.0) } else { 0.0 };
+        let pill_label_opacity = if ease_t > 0.3 { ((ease_t - 0.3) * (1.0 / 0.7)).min(1.0) } else { 0.0 };
         let pill_alpha = self.fade_alpha * pill_label_opacity;
 
-        let show_pill = (self.listening || self.pill_countdown > 0.0 || pill_alpha > 0.0) && ease_t > 0.5;
+        let show_pill = (self.listening || self.processing || self.pill_countdown > 0.0 || pill_alpha > 0.0) && ease_t > 0.3;
 
-        // Pill icons: microphone for recording, checkmark for copied
+        // Pill icons: microphone for recording, pulsing circle for processing, checkmark for done
         if show_pill {
             let cx = rx + rw / 2.0;
             let cy = ry + rh / 2.0;
             let icon_s = rh * 0.5;
-            if is_recording_pill {
+            if self.processing {
+                let pulse = (self.anim_phase.sin() * 0.5 + 0.5) * 0.4 + 0.6;
+                let a = pulse * pill_alpha;
+                let radius = icon_s * 0.35;
+                let mut circle = Path::new();
+                circle.circle(cx, cy, radius);
+                let paint = Paint::color(Color::rgbaf(0.85, 0.85, 0.85, a));
+                self.canvas.fill_path(&circle, &paint);
+            } else if is_recording_pill {
                 let pulse = (self.anim_phase.sin() * 0.5 + 0.5) * 0.4 + 0.6;
                 let a = pulse * pill_alpha;
                 self.draw_mic_icon(cx, cy, icon_s, Color::rgbaf(0.88, 0.25, 0.25, a));
