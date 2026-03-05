@@ -17,7 +17,7 @@ use crate::sound;
 use crate::transcript::TranscriptEvent;
 use crate::tray;
 
-async fn transcribe_with_retry(
+pub(crate) async fn transcribe_with_retry(
     path: &std::path::Path,
     provider: &str,
     lang: &str,
@@ -252,80 +252,32 @@ impl DaemonState {
     }
 
     fn start_vad(&mut self, stop: Arc<AtomicBool>, provider: &str) -> Result<()> {
-        let audio_file = self.config.audio_file.with_extension("chunk.wav");
+        let (stream, audio_rx, sample_rate) = audio::capture_to_channel(stop.clone())?;
+        self._audio_stream = Some(stream);
+
         let state = self.state.clone();
-        let enter_after = self.state.enter;
         let transcript_file = self.config.transcript_file.clone();
         let history_file = self.config.history_file.clone();
+        let chunk_file = self.config.audio_file.with_extension("chunk.wav");
         let provider = provider.to_string();
         let overlay_handle = self.overlay.clone();
 
         self.record_handle = Some(tokio::spawn(async move {
-            let mut full_transcript = String::new();
-            let _ = fs::write(&transcript_file, "");
-
-            while !stop.load(Ordering::Relaxed) {
-                let chunk = audio_file.clone();
-                let stop2 = stop.clone();
-                let status = tokio::task::spawn_blocking(move || {
-                    let mut child = std::process::Command::new("sox")
-                        .args(["-d", &chunk.to_string_lossy()])
-                        .args(["silence", "1", "0.1", "1%", "1", "0.8", "1%"])
-                        .stderr(std::process::Stdio::null())
-                        .spawn()?;
-                    loop {
-                        match child.try_wait()? {
-                            Some(status) => return Ok(status),
-                            None if stop2.load(Ordering::Relaxed) => {
-                                let _ = child.kill();
-                                return child.wait();
-                            }
-                            None => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        }
-                    }
-                })
-                .await;
-
-                let ok = matches!(status, Ok(Ok(s)) if s.success());
-                if !ok || stop.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let size = fs::metadata(&audio_file).map(|m| m.len()).unwrap_or(0);
-                if size < 1000 {
-                    continue;
-                }
-
-                overlay_handle.processing();
-
-                let (_, model) = config::parse_provider_model(&state.model);
-                let result = transcribe_with_retry(&audio_file, &provider, &state.lang, model).await;
-
-                match result {
-                    Ok(transcript) if !transcript.is_empty() => {
-                        full_transcript.push_str(&transcript);
-                        if !full_transcript.ends_with(' ') {
-                            full_transcript.push(' ');
-                        }
-                        output::copy_to_clipboard(&full_transcript);
-                        if state.output != "clipboard" {
-                            output::type_text(&transcript);
-                        }
-                        let _ = fs::write(&transcript_file, &full_transcript);
-                        overlay_handle.set_text(full_transcript.clone());
-                    }
-                    Err(e) => tracing::error!("vad transcribe error: {e}"),
-                    _ => {}
-                }
-
-                let _ = fs::remove_file(&audio_file);
+            if let Err(e) = crate::vad::stream_vad(
+                audio_rx,
+                stop,
+                sample_rate,
+                &provider,
+                &state,
+                overlay_handle.clone(),
+                transcript_file,
+                history_file,
+                chunk_file,
+            )
+            .await
+            {
+                tracing::error!("vad error: {e}");
             }
-
-            let _ = fs::remove_file(&audio_file);
-            if enter_after && state.output != "clipboard" && !full_transcript.trim().is_empty() {
-                output::type_enter();
-            }
-            output::append_history(&history_file, full_transcript.trim());
             sound::play_stop();
             overlay_handle.copied();
         }));

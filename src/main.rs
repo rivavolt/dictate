@@ -11,6 +11,7 @@ mod overlay;
 mod sound;
 mod transcript;
 mod tray;
+mod vad;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};

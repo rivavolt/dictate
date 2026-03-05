@@ -30,6 +30,7 @@ wl-clipboard-rs = "0.9"
 femtovg = "0.9"
 khronos-egl = { version = "6", features = ["dynamic"] }
 wayland-egl = "0.32"
+webrtc-vad = "0.4"
 
 [profile.release]
 strip = true
