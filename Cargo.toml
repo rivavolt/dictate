@@ -34,3 +34,4 @@ webrtc-vad = "0.4"
 
 [profile.release]
 strip = true
+lto = "thin"

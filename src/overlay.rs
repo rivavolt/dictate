@@ -165,6 +165,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
     };
 
     egl_lib.make_current(egl_display, Some(egl_surface), Some(egl_surface), Some(egl_context))?;
+    // Disable vsync blocking — calloop timer handles frame pacing
+    egl_lib.swap_interval(egl_display, 0)?;
 
     let renderer = unsafe {
         femtovg::renderer::OpenGl::new_from_function(|s| {
@@ -216,6 +218,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str) -> Result<()
         frame_ms: 16,
         last_tick: std::time::Instant::now(),
         committed_layer_h: PILL_SIZE + SHADOW_PAD,
+        last_egl_w: 0,
+        last_egl_h: 0,
         exit: false,
     };
 
@@ -364,6 +368,8 @@ struct State {
     frame_ms: u64,
     last_tick: std::time::Instant,
     committed_layer_h: u32,
+    last_egl_w: i32,
+    last_egl_h: i32,
     exit: bool,
 }
 
@@ -608,10 +614,16 @@ impl State {
         let pad = SHADOW_PAD as f32 * sf;
         let ph = (layer_h - pad).max(1.0);
 
-        // Resize EGL surface
-        self.wl_egl_surface.resize(pw as i32, layer_h as i32, 0, 0);
-        self.canvas.set_size(pw as u32, layer_h as u32, 1.0);
-        self.canvas.clear_rect(0, 0, pw as u32, layer_h as u32, Color::rgbaf(0.0, 0.0, 0.0, 0.0));
+        // Resize EGL surface only when pixel dimensions change
+        let egl_w = pw as i32;
+        let egl_h = layer_h as i32;
+        if egl_w != self.last_egl_w || egl_h != self.last_egl_h {
+            self.wl_egl_surface.resize(egl_w, egl_h, 0, 0);
+            self.canvas.set_size(egl_w as u32, egl_h as u32, 1.0);
+            self.last_egl_w = egl_w;
+            self.last_egl_h = egl_h;
+        }
+        self.canvas.clear_rect(0, 0, egl_w as u32, egl_h as u32, Color::rgbaf(0.0, 0.0, 0.0, 0.0));
 
         // Fully faded out — just clear and mark invisible
         if self.fade_alpha <= 0.01 && self.fade_target <= 0.0 {
