@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
@@ -129,17 +130,10 @@ pub fn all_models() -> Vec<String> {
 }
 
 pub struct Config {
+    pub config_file: PathBuf,
     pub state_file: PathBuf,
     pub transcript_file: PathBuf,
     pub audio_file: PathBuf,
-    pub lang_file: PathBuf,
-    pub mode_file: PathBuf,
-    pub output_file: PathBuf,
-    pub font_file: PathBuf,
-    pub enter_file: PathBuf,
-    pub correct_file: PathBuf,
-    pub correct_hold_file: PathBuf,
-    pub model_file: PathBuf,
     pub history_file: PathBuf,
     pub audio_dir: PathBuf,
     pub socket_path: PathBuf,
@@ -150,23 +144,20 @@ impl Config {
         let runtime_dir = PathBuf::from(
             std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string()),
         );
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+            .join("dictate");
         let state_dir = dirs::state_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local/state"))
             .join("dictate");
+        let _ = fs::create_dir_all(&config_dir);
         let _ = fs::create_dir_all(&state_dir);
 
         Self {
+            config_file: config_dir.join("config.toml"),
             state_file: runtime_dir.join("dictate.state"),
             transcript_file: runtime_dir.join("dictate.transcript"),
             audio_file: runtime_dir.join("dictate.wav"),
-            lang_file: state_dir.join("language"),
-            mode_file: state_dir.join("mode"),
-            output_file: state_dir.join("output"),
-            font_file: state_dir.join("font"),
-            enter_file: state_dir.join("enter"),
-            correct_file: state_dir.join("correct"),
-            correct_hold_file: state_dir.join("correct_hold_ms"),
-            model_file: state_dir.join("model"),
             history_file: state_dir.join("history.log"),
             audio_dir: state_dir.join("audio"),
             socket_path: runtime_dir.join("dictate.sock"),
@@ -208,62 +199,49 @@ pub fn get_api_key(provider: &str) -> Result<String> {
     std::env::var(env_var).context(format!("{env_var} not set"))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default = "default_lang")]
     pub lang: String,
+    #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default = "default_mode")]
     pub mode: String,
+    #[serde(default = "default_output")]
     pub output: String,
+    #[serde(default)]
     pub enter: bool,
+    #[serde(default = "default_true")]
     pub correct: bool,
+    #[serde(default = "default_correct_hold_ms")]
     pub correct_hold_ms: u64,
+    #[serde(default = "default_font")]
     pub font: String,
 }
 
+fn default_lang() -> String { std::env::var("DICTATE_LANG").unwrap_or_else(|_| AUTO_LANG.to_string()) }
+fn default_model() -> String { std::env::var("DICTATE_MODEL").unwrap_or_else(|_| "deepgram/nova-3".to_string()) }
+fn default_mode() -> String { "live".to_string() }
+fn default_output() -> String { "type".to_string() }
+fn default_true() -> bool { true }
+fn default_correct_hold_ms() -> u64 { 3000 }
+fn default_font() -> String { std::env::var("DICTATE_FONT").unwrap_or_else(|_| "Inter".to_string()) }
+
 impl State {
     pub fn load(config: &Config) -> Self {
-        let mut lang = fs::read_to_string(&config.lang_file)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| {
-                std::env::var("DICTATE_LANG").unwrap_or_else(|_| AUTO_LANG.to_string())
-            });
-        if lang == "multi" {
-            lang = AUTO_LANG.to_string();
-        }
-
-        let model = fs::read_to_string(&config.model_file)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| {
-                std::env::var("DICTATE_MODEL").unwrap_or_else(|_| "deepgram/nova-3".to_string())
-            });
-
-        let mode = fs::read_to_string(&config.mode_file)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "live".to_string());
-
-        let output = fs::read_to_string(&config.output_file)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "type".to_string());
-
-        let enter = fs::read_to_string(&config.enter_file)
-            .map(|s| s.trim() == "true")
-            .unwrap_or(false);
-
-        let correct = fs::read_to_string(&config.correct_file)
-            .map(|s| s.trim() != "false")
-            .unwrap_or(true);
-
-        let correct_hold_ms = fs::read_to_string(&config.correct_hold_file)
+        let mut state: State = fs::read_to_string(&config.config_file)
             .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(3000);
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_else(|| toml::from_str("").unwrap());
+        if state.lang == "multi" {
+            state.lang = AUTO_LANG.to_string();
+        }
+        state
+    }
 
-        let font = fs::read_to_string(&config.font_file)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| {
-                std::env::var("DICTATE_FONT").unwrap_or_else(|_| "Inter".to_string())
-            });
-
-        Self { lang, model, mode, output, enter, correct, correct_hold_ms, font }
+    pub fn save(&self, config: &Config) {
+        if let Ok(s) = toml::to_string_pretty(self) {
+            let _ = fs::write(&config.config_file, s);
+        }
     }
 }

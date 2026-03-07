@@ -168,7 +168,7 @@ impl DaemonState {
             tracing::info!("{} incompatible with mode={} lang={}, switching to {new_model}",
                 self.state.model, self.state.mode, self.state.lang);
             self.state.model = new_model;
-            let _ = fs::write(&self.config.model_file, &self.state.model);
+            self.state.save(&self.config);
         }
 
         let (provider, _model) = config::parse_provider_model(&self.state.model);
@@ -419,14 +419,13 @@ impl DaemonState {
             "mode" => {
                 if let Some(m) = req.arg {
                     if ["live", "vad", "batch"].contains(&m.as_str()) {
-                        let _ = fs::write(&self.config.mode_file, &m);
                         self.state.mode = m.clone();
                         let mut msg = format!("mode: {m}");
                         if let Some(new_model) = config::resolve_model(&self.state.model, &self.state.mode, &self.state.lang) {
                             self.state.model = new_model.clone();
-                            let _ = fs::write(&self.config.model_file, &self.state.model);
                             msg.push_str(&format!(" (switched model to {new_model})"));
                         }
+                        self.state.save(&self.config);
                         ipc::Response::ok(msg)
                     } else {
                         ipc::Response::err(format!("invalid mode '{}'. use: live, vad, batch", m))
@@ -441,15 +440,14 @@ impl DaemonState {
             "lang" => {
                 if let Some(l) = req.arg {
                     let lang = if l == "multi" { config::AUTO_LANG.to_string() } else { l };
-                    let _ = fs::write(&self.config.lang_file, &lang);
                     self.state.lang = lang.clone();
                     let label = config::lang_name(&lang).unwrap_or(&lang);
                     let mut msg = format!("language: {label} ({lang})");
                     if let Some(new_model) = config::resolve_model(&self.state.model, &self.state.mode, &self.state.lang) {
                         self.state.model = new_model.clone();
-                        let _ = fs::write(&self.config.model_file, &self.state.model);
                         msg.push_str(&format!(" (switched model to {new_model})"));
                     }
+                    self.state.save(&self.config);
                     ipc::Response::ok(msg)
                 } else {
                     let current = match config::lang_name(&self.state.lang) {
@@ -479,14 +477,14 @@ impl DaemonState {
                                     "font '{f}' not found (fc-match resolved to '{matched}')"
                                 ));
                             }
-                            let _ = fs::write(&self.config.font_file, &f);
                             self.state.font = f.clone();
+                            self.state.save(&self.config);
                             self.overlay.set_font(f.clone());
                             ipc::Response::ok(format!("font: {f}"))
                         }
                         Err(_) => {
-                            let _ = fs::write(&self.config.font_file, &f);
                             self.state.font = f.clone();
+                            self.state.save(&self.config);
                             self.overlay.set_font(f.clone());
                             ipc::Response::ok(format!("font: {f} (could not verify)"))
                         }
@@ -500,20 +498,19 @@ impl DaemonState {
                     match v.as_str() {
                         "on" | "true" => {
                             self.state.enter = true;
-                            let _ = fs::write(&self.config.enter_file, "true");
+                            self.state.save(&self.config);
                             ipc::Response::ok("enter: on")
                         }
                         "off" | "false" => {
                             self.state.enter = false;
-                            let _ = fs::write(&self.config.enter_file, "false");
+                            self.state.save(&self.config);
                             ipc::Response::ok("enter: off")
                         }
                         _ => ipc::Response::err("invalid value. use: on, off"),
                     }
                 } else {
-                    // Toggle
                     self.state.enter = !self.state.enter;
-                    let _ = fs::write(&self.config.enter_file, if self.state.enter { "true" } else { "false" });
+                    self.state.save(&self.config);
                     ipc::Response::ok(format!("enter: {}", if self.state.enter { "on" } else { "off" }))
                 }
             }
@@ -522,19 +519,19 @@ impl DaemonState {
                     match v.as_str() {
                         "on" | "true" => {
                             self.state.correct = true;
-                            let _ = fs::write(&self.config.correct_file, "true");
+                            self.state.save(&self.config);
                             ipc::Response::ok("correct: on")
                         }
                         "off" | "false" => {
                             self.state.correct = false;
-                            let _ = fs::write(&self.config.correct_file, "false");
+                            self.state.save(&self.config);
                             ipc::Response::ok("correct: off")
                         }
                         _ => ipc::Response::err("invalid value. use: on, off"),
                     }
                 } else {
                     self.state.correct = !self.state.correct;
-                    let _ = fs::write(&self.config.correct_file, if self.state.correct { "true" } else { "false" });
+                    self.state.save(&self.config);
                     ipc::Response::ok(format!("correct: {}", if self.state.correct { "on" } else { "off" }))
                 }
             }
@@ -543,7 +540,7 @@ impl DaemonState {
                     match v.parse::<u64>() {
                         Ok(ms) => {
                             self.state.correct_hold_ms = ms;
-                            let _ = fs::write(&self.config.correct_hold_file, &v);
+                            self.state.save(&self.config);
                             ipc::Response::ok(format!("correct-hold: {ms}ms"))
                         }
                         Err(_) => ipc::Response::err("invalid value, expected milliseconds"),
@@ -555,8 +552,8 @@ impl DaemonState {
             "output" => {
                 if let Some(o) = req.arg {
                     if ["type", "clipboard"].contains(&o.as_str()) {
-                        let _ = fs::write(&self.config.output_file, &o);
                         self.state.output = o.clone();
+                        self.state.save(&self.config);
                         ipc::Response::ok(format!("output: {}", o))
                     } else {
                         ipc::Response::err(format!("invalid output '{}'. use: type, clipboard", o))
@@ -601,8 +598,8 @@ impl DaemonState {
                     if caps.lang == config::LangSupport::EnglishOnly && self.state.lang != "en" {
                         warnings.push("english only".into());
                     }
-                    let _ = fs::write(&self.config.model_file, &m);
                     self.state.model = m.clone();
+                    self.state.save(&self.config);
                     let mut msg = format!("model: {m}");
                     if !warnings.is_empty() {
                         msg.push_str(&format!(" ({})", warnings.join(", ")));
