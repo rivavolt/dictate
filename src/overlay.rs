@@ -910,19 +910,11 @@ impl State {
             let bg_paint = Paint::color(Color::rgbaf(0.0, 0.0, 0.0, bg_alpha));
             self.canvas.fill_path(&bg_path, &bg_paint);
 
-            // Top edge highlight
-            if !is_circle {
-                let hl_y = ry + sf * 0.5;
-                let hl_inset = r * 0.6;
-                let mut hl = Path::new();
-                hl.move_to(rx + hl_inset, hl_y);
-                hl.line_to(rx + rw - hl_inset, hl_y);
-                let hl_alpha = if self.listening || self.correcting { 0.12 } else { 0.07 };
-                let mut hl_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, hl_alpha * self.fade_alpha));
-                hl_paint.set_line_width(sf);
-                hl_paint.set_line_cap(femtovg::LineCap::Round);
-                self.canvas.stroke_path(&hl, &hl_paint);
-            }
+            // Border
+            let border_path = make_bg_path(0.0);
+            let mut border_paint = Paint::color(Color::rgbaf(1.0, 1.0, 1.0, 0.12 * self.fade_alpha));
+            border_paint.set_line_width(sf);
+            self.canvas.stroke_path(&border_path, &border_paint);
         }
 
         // Text opacity (includes correction crossfade)
