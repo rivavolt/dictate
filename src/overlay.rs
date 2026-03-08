@@ -40,6 +40,7 @@ const SHADOW_PAD: u32 = 26;
 const SHADOW_PAD_BOT: u32 = 8;
 const PILL_ICON_PAD: f32 = 0.30; // fraction of pill height reserved as padding on each side
 const CHUNK_TAU: f32 = 80.0;
+const FINALIZE_TAU: f32 = 60.0;
 
 // Phosphor Icons (MIT) — Check Bold, green to match done glow
 const CHECK_BOLD_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="#33b34d"><path d="M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z"/></svg>"##;
@@ -258,6 +259,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str, audio_level:
         correct_fade: 1.0,
         reveal_len: 0,
         chunk_fade: 1.0,
+        color_split: 0,
+        finalize_fade: 1.0,
         exit: false,
     };
 
@@ -288,6 +291,8 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str, audio_level:
                     state.wrapped_dirty = true;
                     state.reveal_len = 0;
                     state.chunk_fade = 1.0;
+                    state.color_split = 0;
+                    state.finalize_fade = 1.0;
                     state.fade_alpha = 0.0;
                     state.fade_target = 1.0;
                     let pill_w = PILL_SIZE as f32 * state.scale as f32;
@@ -315,6 +320,7 @@ fn run(cmd_rx: calloop::channel::Channel<Command>, font_name: &str, audio_level:
                     state.pending.clear();
                     state.wrapped_dirty = true;
                     state.update_reveal();
+                    state.update_finalize();
                     if state.visible {
                         state.resize_and_redraw();
                     }
@@ -440,6 +446,8 @@ struct State {
     correct_fade: f32,  // text crossfade during correction: 0=invisible, 1=visible
     reveal_len: usize,  // bytes of display text fully visible
     chunk_fade: f32,    // 0→1 fade for text after reveal_len
+    color_split: usize, // bytes of confirmed-white final text
+    finalize_fade: f32, // 0→1 grey→white for newly finalized text
     exit: bool,
 }
 
@@ -482,6 +490,7 @@ impl State {
             || self.done
             || self.correct_fade < 0.99
             || self.chunk_fade < 0.99
+            || self.finalize_fade < 0.99
             || f32::from_bits(self.audio_level.load(Ordering::Relaxed)) > 0.001
         )
     }
@@ -554,6 +563,16 @@ impl State {
         // Text crossfade during correction
         if self.correct_fade < 0.99 {
             chase(&mut self.correct_fade, 1.0, 60.0, dt, 0.01);
+            needs_redraw = true;
+        }
+
+        // Finalize fade (pending grey → final white)
+        if self.finalize_fade < 0.99 {
+            chase(&mut self.finalize_fade, 1.0, FINALIZE_TAU, dt, 0.01);
+            if self.finalize_fade >= 0.99 {
+                let sep = if !self.text.is_empty() && !self.pending.is_empty() && !self.text.ends_with(' ') { 1 } else { 0 };
+                self.color_split = self.text.len() + sep;
+            }
             needs_redraw = true;
         }
 
@@ -632,6 +651,21 @@ impl State {
         }
         if new_len > self.reveal_len && self.chunk_fade >= 0.99 {
             self.chunk_fade = 0.0;
+        }
+    }
+
+    fn update_finalize(&mut self) {
+        if self.correcting {
+            self.color_split = self.text.len();
+            self.finalize_fade = 1.0;
+            return;
+        }
+        let new_split = self.text.len(); // pending is cleared in SetText
+        if new_split > self.color_split && self.finalize_fade >= 0.99 {
+            self.finalize_fade = 0.0;
+        }
+        if new_split < self.color_split {
+            self.color_split = new_split;
         }
     }
 
@@ -967,11 +1001,15 @@ impl State {
             let final_with_sep = format!("{}{separator}", self.text);
 
             let pending_alpha = text_alpha * 0.5;
-            let chunk_text_alpha = text_alpha * self.chunk_fade;
-            let chunk_pending_alpha = pending_alpha * self.chunk_fade;
 
             let split_at = final_with_sep.len();
+            let color_at = self.color_split;
             let reveal_at = self.reveal_len;
+
+            // Interpolated finalize color (pending grey → final white)
+            let fin_c = 0.6 + 0.4 * self.finalize_fade;
+            let fin_a = pending_alpha + (text_alpha - pending_alpha) * self.finalize_fade;
+
             let base_y = pad + ph - PADDING_Y * sf - total_text_h + scroll_y;
             let mut display_pos = 0usize;
 
@@ -983,10 +1021,12 @@ impl State {
                 p
             };
             let paints = [
-                make_paint(1.0, 1.0, 1.0, text_alpha),           // revealed final
-                make_paint(0.6, 0.6, 0.6, pending_alpha),        // revealed pending
-                make_paint(1.0, 1.0, 1.0, chunk_text_alpha),     // new final
-                make_paint(0.6, 0.6, 0.6, chunk_pending_alpha),  // new pending
+                make_paint(1.0, 1.0, 1.0, text_alpha),                    // 0: confirmed final, revealed
+                make_paint(fin_c, fin_c, fin_c, fin_a),                    // 1: finalizing, revealed
+                make_paint(0.6, 0.6, 0.6, pending_alpha),                 // 2: pending, revealed
+                make_paint(1.0, 1.0, 1.0, text_alpha * self.chunk_fade),  // 3: confirmed final, new
+                make_paint(fin_c, fin_c, fin_c, fin_a * self.chunk_fade), // 4: finalizing, new
+                make_paint(0.6, 0.6, 0.6, pending_alpha * self.chunk_fade), // 5: pending, new
             ];
 
             for (i, line) in self.wrapped_lines.iter().enumerate() {
@@ -1004,11 +1044,12 @@ impl State {
                     continue;
                 }
 
-                // Two split points within this line (clamped, snapped to char boundaries)
+                // Three split points within this line (clamped, snapped to char boundaries)
+                let cs = line.floor_char_boundary((color_at.saturating_sub(line_start)).min(line.len()));
                 let sp = line.floor_char_boundary((split_at.saturating_sub(line_start)).min(line.len()));
                 let rp = line.floor_char_boundary((reveal_at.saturating_sub(line_start)).min(line.len()));
 
-                let mut cuts = [0, sp, rp, line.len()];
+                let mut cuts = [0, cs, sp, rp, line.len()];
                 cuts.sort();
 
                 let mut x_off = 0.0f32;
@@ -1017,13 +1058,11 @@ impl State {
                     if s >= e { continue; }
                     let segment = &line[s..e];
                     let byte_pos = line_start + s;
-                    let paint_idx = match (byte_pos < split_at, byte_pos < reveal_at) {
-                        (true, true)   => 0, // revealed final
-                        (false, true)  => 1, // revealed pending
-                        (true, false)  => 2, // new final
-                        (false, false) => 3, // new pending
-                    };
-                    let _ = self.canvas.fill_text(text_x + x_off, y, segment, &paints[paint_idx]);
+                    let type_idx = if byte_pos < color_at { 0 }
+                        else if byte_pos < split_at { 1 }
+                        else { 2 };
+                    let reveal_off = if byte_pos < reveal_at { 0 } else { 3 };
+                    let _ = self.canvas.fill_text(text_x + x_off, y, segment, &paints[type_idx + reveal_off]);
                     x_off += self.measure_text_width(segment, font_sz);
                 }
             }
