@@ -1122,7 +1122,7 @@ impl LayerShellHandler for State {
             let margin_h = ((w - overlay_w) / 2) as i32;
             let margin_b = 32;
             let content_w = overlay_w as f32 - PADDING_X * 2.0;
-            self.font_size = content_w / (100.0 * CHAR_WIDTH_RATIO);
+            self.font_size = content_w / (70.0 * CHAR_WIDTH_RATIO);
             self.line_height = self.font_size * 1.5;
             let golden_h = (overlay_w as f32 / 1.618) as u32;
             let max_lines = ((golden_h as f32 - PADDING_Y * 2.0) / self.line_height).floor().max(1.0) as u32;
