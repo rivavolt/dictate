@@ -744,6 +744,9 @@ pub async fn run() -> Result<()> {
                     tray::TrayCommand::SetModel(m) => {
                         daemon.handle_command(ipc::Request { command: "model".into(), arg: Some(m) });
                     }
+                    tray::TrayCommand::SetInput(d) => {
+                        daemon.handle_command(ipc::Request { command: "input".into(), arg: Some(d) });
+                    }
                     tray::TrayCommand::ToggleEnter => {
                         daemon.handle_command(ipc::Request { command: "enter".into(), arg: None });
                     }

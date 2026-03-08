@@ -2,6 +2,7 @@ use ksni::menu::*;
 use ksni::{self, Icon, Tray, TrayMethods};
 use tokio::sync::mpsc;
 
+use crate::audio;
 use crate::config;
 
 // Phosphor Icons (MIT) — bold for idle, fill for recording
@@ -57,6 +58,7 @@ pub enum TrayCommand {
     SetOutput(String),
     SetLang(String),
     SetModel(String),
+    SetInput(String),
     ToggleEnter,
     ToggleCorrect,
 }
@@ -79,6 +81,8 @@ pub struct DictateTray {
     output: usize,
     lang: usize,
     model: usize,
+    input: usize,
+    input_devices: Vec<String>,
     enter: bool,
     correct: bool,
     langs: Vec<(&'static str, &'static str)>,
@@ -103,6 +107,9 @@ impl DictateTray {
             .iter()
             .position(|&m| m == state.model)
             .unwrap_or(0);
+        self.input_devices = audio::list_input_devices();
+        let match_name = if state.input.is_empty() { audio::default_input_name() } else { state.input.clone() };
+        self.input = self.input_devices.iter().position(|d| d == &match_name).unwrap_or(0);
         self.enter = state.enter;
         self.correct = state.correct;
     }
@@ -241,6 +248,30 @@ impl Tray for DictateTray {
             ..Default::default()
         };
 
+        let input_devices = self.input_devices.clone();
+        let tx = self.cmd_tx.clone();
+        let input_menu = SubMenu {
+            label: "Input".into(),
+            submenu: vec![RadioGroup {
+                selected: self.input,
+                select: Box::new(move |tray: &mut Self, idx| {
+                    tray.input = idx;
+                    if let Some(name) = input_devices.get(idx) {
+                        let _ = tx.try_send(TrayCommand::SetInput(name.clone()));
+                    }
+                }),
+                options: self.input_devices
+                    .iter()
+                    .map(|d| RadioItem {
+                        label: d.clone(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
+            ..Default::default()
+        };
+
         let enter_item = CheckmarkItem {
             label: "Press Enter".into(),
             checked: self.enter,
@@ -266,6 +297,7 @@ impl Tray for DictateTray {
             output_menu.into(),
             lang_menu.into(),
             model_menu.into(),
+            input_menu.into(),
             MenuItem::Separator,
             enter_item.into(),
             correct_item.into(),
@@ -278,12 +310,17 @@ pub async fn spawn(
     state: &config::State,
 ) -> anyhow::Result<ksni::Handle<DictateTray>> {
     let langs = sorted_languages();
+    let input_devices = audio::list_input_devices();
+    let match_name = if state.input.is_empty() { audio::default_input_name() } else { state.input.clone() };
+    let input_idx = input_devices.iter().position(|d| d == &match_name).unwrap_or(0);
     let tray = DictateTray {
         recording: false,
         mode: MODES.iter().position(|&m| m == state.mode).unwrap_or(0),
         output: OUTPUTS.iter().position(|&o| o == state.output).unwrap_or(0),
         lang: langs.iter().position(|(c, _)| *c == state.lang).unwrap_or(0),
         model: config::ALL_MODELS.iter().position(|&m| m == state.model).unwrap_or(0),
+        input: input_idx,
+        input_devices,
         enter: state.enter,
         correct: state.correct,
         langs,
