@@ -30,7 +30,7 @@ femtovg = "0.9"
 khronos-egl = { version = "6", features = ["dynamic"] }
 wayland-egl = "0.32"
 toml = "0.8"
-webrtc-vad = "0.4"
+earshot = "1.0"
 resvg = { version = "0.44", default-features = false }
 
 [profile.release]

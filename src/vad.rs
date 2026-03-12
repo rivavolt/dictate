@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use crate::audio;
 use crate::config;
@@ -12,22 +11,13 @@ use crate::daemon;
 use crate::output;
 use crate::overlay;
 
-// Vad contains *mut Fvad (not Send), but we only use it from a single task.
-struct SendVad(Vad);
-unsafe impl Send for SendVad {}
-
-impl SendVad {
-    fn is_voice_segment(&mut self, samples: &[i16]) -> bool {
-        self.0.is_voice_segment(samples).unwrap_or(false)
-    }
-}
-
 const VAD_RATE: u32 = 16000;
-const VAD_FRAME_MS: u32 = 30;
-const VAD_FRAME_SAMPLES: usize = (VAD_RATE * VAD_FRAME_MS / 1000) as usize; // 480
-const SILENCE_THRESHOLD: usize = 27; // 27 * 30ms = 810ms
-const PRE_SPEECH_FRAMES: usize = 5; // 150ms
-const DEBOUNCE_FRAMES: usize = 2;
+const VAD_FRAME_SAMPLES: usize = 256; // earshot requires exactly 256 samples (16ms at 16kHz)
+const VAD_FRAME_MS: u32 = 16;
+const VOICE_THRESHOLD: f32 = 0.5;
+const SILENCE_THRESHOLD: usize = 51; // ~816ms (51 * 16ms)
+const PRE_SPEECH_FRAMES: usize = 10; // ~160ms
+const DEBOUNCE_FRAMES: usize = 4; // ~64ms
 
 fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     let spec = hound::WavSpec {
@@ -55,9 +45,9 @@ pub async fn stream_vad(
     transcript_file: PathBuf,
     chunk_file: PathBuf,
 ) -> Result<String> {
-    let mut vad = SendVad(Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive));
+    let mut detector = earshot::Detector::default();
 
-    // Native-rate frame size for 30ms
+    // Native-rate frame size matching VAD frame duration
     let native_frame_samples = (sample_rate * VAD_FRAME_MS / 1000) as usize;
     let min_speech_samples = (sample_rate as usize) * 300 / 1000; // 300ms at native rate
 
@@ -89,7 +79,7 @@ pub async fn stream_vad(
             // Resample to 16kHz for VAD detection
             let vad_samples = audio::resample(&native_frame, sample_rate, VAD_RATE);
             let is_voice = vad_samples.len() >= VAD_FRAME_SAMPLES
-                && vad.is_voice_segment(&vad_samples[..VAD_FRAME_SAMPLES]);
+                && detector.predict_i16(&vad_samples[..VAD_FRAME_SAMPLES]) >= VOICE_THRESHOLD;
 
             if !speech_active {
                 if is_voice {
@@ -141,6 +131,7 @@ pub async fn stream_vad(
                         silence_count = 0;
                         voice_count = 0;
                         pre_buffer.clear();
+                        detector.reset();
                     }
                 }
             }

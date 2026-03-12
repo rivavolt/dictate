@@ -5,9 +5,9 @@ use tokio::sync::mpsc;
 use crate::audio;
 use crate::config;
 
-// Phosphor Icons (MIT) — bold for idle, fill for recording
-const MIC_BOLD_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="FILL"><path d="M128,180a52.06,52.06,0,0,0,52-52V64A52,52,0,0,0,76,64v64A52.06,52.06,0,0,0,128,180ZM100,64a28,28,0,0,1,56,0v64a28,28,0,0,1-56,0Zm40,155.22V240a12,12,0,0,1-24,0V219.22A92.14,92.14,0,0,1,36,128a12,12,0,0,1,24,0,68,68,0,0,0,136,0,12,12,0,0,1,24,0A92.14,92.14,0,0,1,140,219.22Z"/></svg>"#;
-const MIC_FILL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="FILL"><path d="M80,128V64a48,48,0,0,1,96,0v64a48,48,0,0,1-96,0Zm128,0a8,8,0,0,0-16,0,64,64,0,0,1-128,0,8,8,0,0,0-16,0,80.11,80.11,0,0,0,72,79.6V240a8,8,0,0,0,16,0V207.6A80.11,80.11,0,0,0,208,128Z"/></svg>"#;
+// Phosphor Icons (MIT) — CursorText bold/fill for dictation (distinct from mic and assistant chat)
+const ICON_BOLD_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="FILL"><path d="M188,208a12,12,0,0,1-12,12H160a44.05,44.05,0,0,1-32-13.85A44.05,44.05,0,0,1,96,220H80a12,12,0,0,1,0-24H96a20,20,0,0,0,20-20V140H104a12,12,0,0,1,0-24h12V80A20,20,0,0,0,96,60H80a12,12,0,0,1,0-24H96a44.05,44.05,0,0,1,32,13.85A44.05,44.05,0,0,1,160,36h16a12,12,0,0,1,0,24H160a20,20,0,0,0-20,20v36h12a12,12,0,0,1,0,24H140v36a20,20,0,0,0,20,20h16A12,12,0,0,1,188,208Z"/></svg>"#;
+const ICON_FILL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="FILL"><path d="M188,208a12,12,0,0,1-12,12H160a44.05,44.05,0,0,1-32-13.85A44.05,44.05,0,0,1,96,220H80a12,12,0,0,1,0-24H96a20,20,0,0,0,20-20V140H104a12,12,0,0,1,0-24h12V80A20,20,0,0,0,96,60H80a12,12,0,0,1,0-24H96a44.05,44.05,0,0,1,32,13.85A44.05,44.05,0,0,1,160,36h16a12,12,0,0,1,0,24H160a20,20,0,0,0-20,20v36h12a12,12,0,0,1,0,24H140v36a20,20,0,0,0,20,20h16A12,12,0,0,1,188,208Z"/></svg>"#;
 
 fn render_icon(svg_template: &str, color: &str, size: u32) -> Icon {
     let svg = svg_template.replace("FILL", color);
@@ -47,8 +47,8 @@ struct TrayIcons {
 fn make_icons() -> TrayIcons {
     let sizes = [24, 48];
     TrayIcons {
-        idle: sizes.iter().map(|&s| render_icon(MIC_BOLD_SVG, "#FFFFFF", s)).collect(),
-        recording: sizes.iter().map(|&s| render_icon(MIC_FILL_SVG, "#E04040", s)).collect(),
+        idle: sizes.iter().map(|&s| render_icon(ICON_BOLD_SVG, "#FFFFFF", s)).collect(),
+        recording: sizes.iter().map(|&s| render_icon(ICON_FILL_SVG, "#E04040", s)).collect(),
     }
 }
 
@@ -129,11 +129,7 @@ impl Tray for DictateTray {
     }
 
     fn icon_name(&self) -> String {
-        if self.recording {
-            "media-record".into()
-        } else {
-            "audio-input-microphone".into()
-        }
+        String::new()
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
