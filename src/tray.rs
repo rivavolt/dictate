@@ -45,7 +45,7 @@ struct TrayIcons {
 }
 
 fn make_icons() -> TrayIcons {
-    let sizes = [24, 48];
+    let sizes = [20, 40];
     TrayIcons {
         idle: sizes.iter().map(|&s| render_icon(ICON_BOLD_SVG, "#FFFFFF", s)).collect(),
         recording: sizes.iter().map(|&s| render_icon(ICON_FILL_SVG, "#E04040", s)).collect(),
@@ -145,7 +145,6 @@ impl Tray for DictateTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        self.recording = !self.recording;
         let _ = self.cmd_tx.try_send(TrayCommand::Toggle);
     }
 
