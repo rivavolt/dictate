@@ -129,19 +129,11 @@ impl Tray for DictateTray {
     }
 
     fn icon_name(&self) -> String {
-        if self.recording {
-            "dictate-recording".into()
-        } else {
-            "dictate-idle".into()
-        }
+        String::new()
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
-        if self.recording {
-            self.icons.recording.clone()
-        } else {
-            self.icons.idle.clone()
-        }
+        self.icons.idle.clone()
     }
 
     fn status(&self) -> ksni::Status {
