@@ -136,8 +136,16 @@ impl Tray for DictateTray {
         self.icons.idle.clone()
     }
 
+    fn attention_icon_pixmap(&self) -> Vec<Icon> {
+        self.icons.recording.clone()
+    }
+
     fn status(&self) -> ksni::Status {
-        ksni::Status::Active
+        if self.recording {
+            ksni::Status::NeedsAttention
+        } else {
+            ksni::Status::Active
+        }
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
